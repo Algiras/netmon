@@ -75,23 +75,35 @@ class NetmonMenuBar: NSObject {
 
     override init() {
         super.init()
-        setButton("⚡")
+        updateButton(count: 0, autonomous: false)
         statusItem.menu = NSMenu()
         startPolling()
     }
 
-    private func setButton(_ text: String, color: NSColor? = nil) {
-        if let color {
-            let attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: color,
-                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
-                .baselineOffset: 0.5,
-            ]
-            statusItem.button?.attributedTitle = NSAttributedString(string: text, attributes: attrs)
+    private func updateButton(count: Int, autonomous: Bool) {
+        guard let button = statusItem.button else { return }
+
+        // Use SF Symbol bolt as the base icon — template rendering adapts to light/dark mode
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "netmon")!
+            .withSymbolConfiguration(config)!
+
+        if count > 0 {
+            bolt.isTemplate = false
+            let tinted = bolt.tinted(with: count > 2 ? .systemRed : .systemOrange)
+            button.image = tinted
+            button.title = " \(count)"
+            button.imagePosition = .imageLeft
+        } else if autonomous {
+            bolt.isTemplate = false
+            button.image = bolt.tinted(with: .systemGreen)
+            button.title = ""
+            button.imagePosition = .imageOnly
         } else {
-            // No explicit color — let the system use the default menu bar tint (works in both light and dark mode)
-            statusItem.button?.attributedTitle = NSAttributedString(string: "")
-            statusItem.button?.title = text
+            bolt.isTemplate = true
+            button.image = bolt
+            button.title = ""
+            button.imagePosition = .imageOnly
         }
     }
 
@@ -127,13 +139,7 @@ class NetmonMenuBar: NSObject {
         autonomousMode = response?.config?.autonomous_mode ?? autonomousMode
 
         // Update button
-        if count > 0 {
-            let color: NSColor = count > 2 ? .systemRed : .systemOrange
-            setButton("⚡ \(count)", color: color)
-        } else {
-            let label = autonomousMode ? "⚡ 🤖" : "⚡"
-            setButton(label, color: autonomousMode ? .systemGreen : nil)
-        }
+        updateButton(count: count, autonomous: autonomousMode)
 
         // Rebuild menu
         let menu = NSMenu()
@@ -305,6 +311,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 }
 
 // ── App entry ─────────────────────────────────────────────────────────────────
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+extension NSImage {
+    func tinted(with color: NSColor) -> NSImage {
+        let copy = self.copy() as! NSImage
+        copy.isTemplate = false
+        copy.lockFocus()
+        color.set()
+        NSRect(origin: .zero, size: copy.size).fill(using: .sourceAtop)
+        copy.unlockFocus()
+        return copy
+    }
+}
 
 let app      = NSApplication.shared
 let delegate = AppDelegate()
