@@ -22,7 +22,9 @@ if [ -f "$BINARY" ]; then
     [ -f "$NETMON/MenuBar/Assets/netmon.icns" ] && \
         cp "$NETMON/MenuBar/Assets/netmon.icns" "$APP/Contents/Resources/netmon.icns"
     codesign --force --deep --sign - "$APP" 2>/dev/null
+    cp -r "$APP" /Applications/NetmonMenuBar.app
     echo "✓ Binary: $BINARY"
+    echo "✓ Installed: /Applications/NetmonMenuBar.app"
     echo ""
     echo "==> Loading LaunchAgents..."
     for plist in \

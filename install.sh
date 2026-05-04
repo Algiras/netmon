@@ -138,6 +138,30 @@ cat > "$AGENTS/com.user.netmon.panel.plist" << EOF
 </plist>
 EOF
 
+cat > "$AGENTS/com.user.netmon.menubar.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.netmon.menubar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${NETMON}/menubar.log</string>
+  <key>StandardErrorPath</key>
+  <string>${NETMON}/menubar.err</string>
+</dict>
+</plist>
+EOF
+echo "  ✓ $AGENTS/com.user.netmon.menubar.plist"
+
 echo ""
 echo "==> Building Swift menu bar app..."
 bash "$NETMON/build.sh"
