@@ -17,7 +17,7 @@ xcrun swiftc -sdk "$SDK" \
   -o "$BINARY"
 
 if [ -f "$BINARY" ]; then
-    # Re-sign to bind Info.plist (swiftc ad-hoc sig doesn't cover it)
+    cp "$NETMON/MenuBar/Info.plist" "$APP/Contents/Info.plist"
     codesign --force --deep --sign - "$APP" 2>/dev/null
     echo "✓ Binary: $BINARY"
     echo ""

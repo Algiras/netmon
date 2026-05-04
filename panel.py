@@ -32,24 +32,19 @@ def write_config(data: dict):
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
 
-def list_ollama_models() -> list[dict]:
-    """Return installed Ollama models that support tool calling."""
+def list_ollama_models() -> dict:
+    """Return installed Ollama models split into llm (tools) and embed categories."""
     try:
         req = urllib.request.Request("http://localhost:11434/api/tags")
         with urllib.request.urlopen(req, timeout=5) as r:
             tags = json.loads(r.read())
     except Exception:
-        return []
+        return {"llm": [], "embed": []}
 
-    # Embedding-only model families to exclude
-    EMBED_FAMILIES = {"nomic-bert-moe", "bert", "clip"}
-
-    results = []
+    llm, embed = [], []
     for m in tags.get("models", []):
-        name   = m["name"]
-        family = m.get("details", {}).get("family", "")
-        if family in EMBED_FAMILIES:
-            continue
+        name = m["name"]
+        size = m.get("details", {}).get("parameter_size", "?")
         try:
             req2 = urllib.request.Request(
                 "http://localhost:11434/api/show",
@@ -60,16 +55,14 @@ def list_ollama_models() -> list[dict]:
             with urllib.request.urlopen(req2, timeout=5) as r:
                 info = json.loads(r.read())
             caps = info.get("capabilities", [])
-            tools_ok = "tools" in caps
         except Exception:
-            tools_ok = False
-        results.append({
-            "name":    name,
-            "size":    m.get("details", {}).get("parameter_size", "?"),
-            "tools":   tools_ok,
-            "caps":    caps if isinstance(caps, list) else [],
-        })
-    return results
+            caps = []
+        entry = {"name": name, "size": size, "caps": caps}
+        if "tools" in caps:
+            llm.append(entry)
+        elif "embedding" in caps:
+            embed.append(entry)
+    return {"llm": llm, "embed": embed}
 
 # ── HTML template ──────────────────────────────────────────────────────────────
 
@@ -145,10 +138,15 @@ HTML_TEMPLATE = """\
 
   <div class="model-bar">
     <label>🤖 LLM</label>
-    <select class="model-select" id="model-select" onchange="setModel(this.value)">
-      {model_options}
+    <select class="model-select" onchange="setCfg('llm_model', this.value)">
+      {llm_options}
     </select>
     <span class="tools-badge">⚙ tool calling</span>
+    <label style="margin-left:16px">🔢 Embeddings</label>
+    <select class="model-select" onchange="setEmbed(this.value)">
+      {embed_options}
+    </select>
+    <span class="tools-badge" style="background:#1e2a3a;color:#60a5fa">📐 vectors</span>
   </div>
 
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
@@ -185,12 +183,22 @@ HTML_TEMPLATE = """\
         body: JSON.stringify({{id, action}})
       }}).then(() => location.reload());
     }}
-    function setModel(name) {{
+    function setCfg(key, val) {{
       fetch('/config', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{model: name}})
+        body: JSON.stringify({{[key]: val}})
       }});
+    }}
+    function setEmbed(name) {{
+      if (!confirm('Changing the embedding model clears all stored embeddings (RAG memory). Continue?')) {{
+        location.reload(); return;
+      }}
+      fetch('/config', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{embed_model: name, _clear_embeddings: true}})
+      }}).then(() => location.reload());
     }}
     function toggleAuto() {{
       fetch('/config', {{
@@ -275,15 +283,18 @@ def _render_page() -> str:
         auto_label     = "👁 Review Mode"
         auto_btn_style = "background:#1a1d27;color:#8892a4;border-color:#2a2d3a;"
 
+    current_llm   = cfg.get("llm_model",   "granite4.1:3b")
+    current_embed = cfg.get("embed_model", "nomic-embed-text-v2-moe")
     models = list_ollama_models()
-    tool_models = [m for m in models if m["tools"]]
-    if not tool_models:
-        tool_models = [{"name": current_model, "size": "?"}]
 
-    options = []
-    for m in tool_models:
-        sel = ' selected' if m["name"] == current_model else ''
-        options.append(f'<option value="{m["name"]}"{sel}>{m["name"]}  ({m["size"]})</option>')
+    def _opts(model_list, current):
+        opts = []
+        for m in model_list:
+            sel = ' selected' if m["name"] == current else ''
+            opts.append(f'<option value="{m["name"]}"{sel}>{m["name"]}  ({m["size"]})</option>')
+        if not opts:
+            opts.append(f'<option selected>{current}</option>')
+        return "\n      ".join(opts)
 
     return HTML_TEMPLATE.format(
         pending_count  = badge,
@@ -291,7 +302,8 @@ def _render_page() -> str:
         history_html   = _render_table(history, pending=False),
         auto_label     = auto_label,
         auto_btn_style = auto_btn_style,
-        model_options  = "\n      ".join(options),
+        llm_options    = _opts(models["llm"],   current_llm),
+        embed_options  = _opts(models["embed"], current_embed),
     )
 
 
@@ -324,7 +336,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/config":
             self._respond(200, json.dumps(read_config()), "application/json")
         elif self.path == "/api/models":
-            self._respond(200, json.dumps(list_ollama_models()), "application/json")
+            data = {**list_ollama_models(), "config": read_config()}
+            self._respond(200, json.dumps(data), "application/json")
         else:
             self._respond(404, "not found")
 
@@ -333,12 +346,16 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
             cfg    = read_config()
+            clear_emb = body.pop("_clear_embeddings", False)
             if "toggle" in body:
-                key     = body["toggle"]
+                key      = body["toggle"]
                 cfg[key] = not cfg.get(key, False)
             else:
                 cfg.update(body)
             write_config(cfg)
+            if clear_emb:
+                db.init()
+                db.clear_embeddings()
             self._respond(200, json.dumps(cfg), "application/json")
         elif self.path == "/action":
             length = int(self.headers.get("Content-Length", 0))

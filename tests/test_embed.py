@@ -10,6 +10,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import embed
 
 
+class TestEmbedModelConfig(unittest.TestCase):
+    def test_reads_embed_model_from_config(self):
+        import tempfile, json
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"embed_model": "nomic-embed-text:latest"}, f)
+            tmp = Path(f.name)
+        with patch.object(embed, "_CONFIG_FILE", tmp):
+            model = embed._embed_model()
+        self.assertEqual(model, "nomic-embed-text:latest")
+        Path(tmp).unlink()
+
+    def test_defaults_when_config_missing(self):
+        with patch.object(embed, "_CONFIG_FILE", Path("/nonexistent/config.json")):
+            model = embed._embed_model()
+        self.assertEqual(model, embed._DEFAULT_MODEL)
+
+
 class TestEmbedEvent(unittest.TestCase):
     def _fake_response(self, vector):
         """Build a fake urllib response returning the given embedding."""

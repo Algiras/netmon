@@ -1,18 +1,26 @@
 """
 ~/.netmon/embed.py — Thin wrapper around Ollama /api/embed.
-Uses nomic-embed-text-v2-moe (768-dim) for all event embeddings.
+Reads embedding model from config.json (key: embed_model).
 """
 
 import json
-import urllib.error
 import urllib.request
+from pathlib import Path
 
 OLLAMA_URL   = "http://localhost:11434"
-EMBED_MODEL  = "nomic-embed-text-v2-moe"
+_CONFIG_FILE = Path.home() / ".netmon" / "config.json"
+_DEFAULT_MODEL = "nomic-embed-text-v2-moe"
+
+
+def _embed_model() -> str:
+    try:
+        return json.loads(_CONFIG_FILE.read_text()).get("embed_model", _DEFAULT_MODEL)
+    except Exception:
+        return _DEFAULT_MODEL
 
 
 def embed(text: str) -> list[float] | None:
-    payload = json.dumps({"model": EMBED_MODEL, "input": text}).encode()
+    payload = json.dumps({"model": _embed_model(), "input": text}).encode()
     req = urllib.request.Request(
         f"{OLLAMA_URL}/api/embed",
         data=payload,
@@ -22,7 +30,8 @@ def embed(text: str) -> list[float] | None:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
-            return data["embeddings"][0]
+            vecs = data.get("embeddings", [])
+            return vecs[0] if vecs else None
     except Exception:
         return None
 

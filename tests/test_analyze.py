@@ -101,11 +101,11 @@ class TestDispatch(unittest.TestCase):
 class TestReadConfig(unittest.TestCase):
     def test_reads_model(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"model": "llama3.2:3b", "autonomous_mode": True}, f)
+            json.dump({"llm_model": "llama3.2:3b", "autonomous_mode": True}, f)
             tmp = Path(f.name)
         with patch.object(analyze, "CONFIG_FILE", tmp):
             cfg = analyze.read_config()
-        self.assertEqual(cfg["model"], "llama3.2:3b")
+        self.assertEqual(cfg["llm_model"], "llama3.2:3b")
         self.assertTrue(cfg["autonomous_mode"])
         tmp.unlink()
 

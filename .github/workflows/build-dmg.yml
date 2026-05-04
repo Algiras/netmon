@@ -1,0 +1,57 @@
+name: Build DMG
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build NetmonMenuBar.app
+        run: |
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          mkdir -p NetmonMenuBar.app/Contents/MacOS
+
+          xcrun swiftc -sdk "$SDK" \
+            -framework Foundation -framework AppKit -framework UserNotifications \
+            MenuBar/Sources/MenuBar/Notifier.swift \
+            MenuBar/Sources/MenuBar/NetmonMenuBar.swift \
+            MenuBar/Sources/MenuBar/main.swift \
+            -o NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar
+
+          cp MenuBar/Info.plist NetmonMenuBar.app/Contents/Info.plist
+          codesign --force --deep --sign - NetmonMenuBar.app
+
+      - name: Create DMG
+        run: |
+          # Staging dir with app + symlink to /Applications for drag-install UX
+          mkdir -p dmg-staging
+          cp -r NetmonMenuBar.app dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+
+          hdiutil create \
+            -volname "netmon" \
+            -srcfolder dmg-staging \
+            -ov -format UDZO \
+            netmon.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netmon-${{ github.sha }}
+          path: netmon.dmg
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: netmon.dmg
+          generate_release_notes: true

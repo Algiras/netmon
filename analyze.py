@@ -198,7 +198,7 @@ def dispatch(name: str, args: dict) -> str:
 # ── Ollama ─────────────────────────────────────────────────────────────────────
 
 def chat(messages: list, tools: list | None = None, timeout: int = 90, model: str = "") -> dict:
-    payload: dict = {"model": model or read_config().get("model", "granite4.1:3b"), "messages": messages, "stream": False}
+    payload: dict = {"model": model or read_config().get("llm_model", "granite4.1:3b"), "messages": messages, "stream": False}
     if tools:
         payload["tools"] = tools
     req = urllib.request.Request(

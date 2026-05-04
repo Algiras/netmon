@@ -92,6 +92,12 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+def clear_embeddings():
+    """Null-out all stored embeddings (call when embedding model changes)."""
+    with _conn() as c:
+        c.execute("UPDATE events SET embedding = ''")
+
+
 def find_similar(
     embedding: list[float],
     top_k: int = 5,

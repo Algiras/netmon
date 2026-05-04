@@ -62,6 +62,30 @@ class TestInsertAndRetrieve(unittest.TestCase):
         self.assertEqual(len(db.get_pending()), 2)
 
 
+class TestClearEmbeddings(unittest.TestCase):
+    def setUp(self):
+        self._path = _tmp_db()
+        patch.object(db, "DB_PATH", Path(self._path)).start()
+        db.init()
+
+    def tearDown(self):
+        patch.stopall()
+        Path(self._path).unlink(missing_ok=True)
+
+    def test_clear_removes_all_embeddings(self):
+        vec = [0.1] * 8
+        db.insert_event("bash", "1.2.3.4:22", "warning", "ssh", vec)
+        db.insert_event("chrome", "5.6.7.8:443", "info", "cdn", vec)
+        db.clear_embeddings()
+        results = db.find_similar(vec, top_k=10, min_sim=0.0)
+        self.assertEqual(len(results), 0)
+
+    def test_events_remain_after_clear(self):
+        db.insert_event("bash", "1.2.3.4:22", "warning", "ssh", [0.1] * 8)
+        db.clear_embeddings()
+        self.assertEqual(len(db.get_recent()), 1)
+
+
 class TestFindSimilar(unittest.TestCase):
     def setUp(self):
         self._path = _tmp_db()
