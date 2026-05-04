@@ -42,6 +42,9 @@ if [ -f "$BINARY" ]; then
     echo "  Menu bar: ⚡ (top right)"
     echo "  Panel:    http://localhost:6543"
     echo "  Log:      $NETMON/anomalies.log"
+    echo ""
+    echo "==> Opening Notifications settings — enable NetmonMenuBar to allow alerts."
+    open "x-apple.systempreferences:com.apple.preference.notifications"
 else
     echo "✗ Build failed — check output above."
     exit 1

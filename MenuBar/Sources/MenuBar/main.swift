@@ -230,8 +230,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var menuBarController: NetmonMenuBar?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setupNotifications(delegate: self)
-        menuBarController = NetmonMenuBar()
+        menuBarController = NetmonMenuBar()   // icon first — always visible
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            setupNotifications(delegate: self)
+        }
     }
 
     // Receive action taps (Confirm / Reject buttons)

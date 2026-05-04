@@ -10,6 +10,7 @@ let CATEGORY_ID = "netmon.review"
 
 // Called once at startup to register the category and delegate
 func setupNotifications(delegate: UNUserNotificationCenterDelegate) {
+    guard Bundle.main.bundleIdentifier != nil else { return }
     let center = UNUserNotificationCenter.current()
     center.delegate = delegate
 
