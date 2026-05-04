@@ -163,6 +163,10 @@ EOF
 echo "  ✓ $AGENTS/com.user.netmon.menubar.plist"
 
 echo ""
+echo "==> Setting menu bar visibility..."
+defaults write com.apple.controlcenter "NSStatusItem Visible netmon" -bool true
+
+echo ""
 echo "==> Building Swift menu bar app..."
 bash "$NETMON/build.sh"
 

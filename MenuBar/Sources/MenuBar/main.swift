@@ -62,7 +62,12 @@ func toggleAutonomousMode() {
 }
 
 class NetmonMenuBar: NSObject {
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let statusItem: NSStatusItem = {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.autosaveName = "netmon"
+        item.isVisible = true
+        return item
+    }()
     private var timer: Timer?
     private var lastPendingCount = 0
     private var autonomousMode = false
