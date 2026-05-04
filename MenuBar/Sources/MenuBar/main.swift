@@ -66,6 +66,7 @@ class NetmonMenuBar: NSObject {
     private var timer: Timer?
     private var lastPendingCount = 0
     private var autonomousMode = false
+    var notificationsEnabled = true
 
     override init() {
         super.init()
@@ -84,8 +85,10 @@ class NetmonMenuBar: NSObject {
     }
 
     private func startPolling() {
+        checkNotificationPermission()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.checkNotificationPermission()
             self?.refresh()
         }
     }
@@ -94,6 +97,15 @@ class NetmonMenuBar: NSObject {
         fetchEvents { [weak self] response in
             DispatchQueue.main.async {
                 self?.updateMenu(response: response)
+            }
+        }
+    }
+
+    func checkNotificationPermission() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async {
+                self?.notificationsEnabled = settings.authorizationStatus == .authorized
             }
         }
     }
@@ -120,6 +132,17 @@ class NetmonMenuBar: NSObject {
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
+
+        if !notificationsEnabled {
+            let warn = NSMenuItem(
+                title: "⚠️  Notifications disabled — click to fix",
+                action: #selector(openNotificationSettings),
+                keyEquivalent: ""
+            )
+            warn.target = self
+            menu.addItem(warn)
+            menu.addItem(.separator())
+        }
 
         if pending.isEmpty {
             let ok = NSMenuItem(title: "✓  No pending alerts", action: nil, keyEquivalent: "")
@@ -213,6 +236,10 @@ class NetmonMenuBar: NSObject {
 
     @objc private func openPanel() {
         NSWorkspace.shared.open(URL(string: "http://localhost:6543")!)
+    }
+
+    @objc private func openNotificationSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!)
     }
 
     @objc private func runAnalysis() {
