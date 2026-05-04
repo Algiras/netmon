@@ -44,6 +44,7 @@ if [ -f "$BINARY" ]; then
     echo "  Log:      $NETMON/anomalies.log"
     # Ensure macOS 13+ doesn't hide the status item in the overflow area
     defaults write com.apple.controlcenter "NSStatusItem Visible netmon" -bool true
+    defaults write com.apple.controlcenter "NSStatusItem Preferred Position netmon" -float 100
     echo ""
     echo "==> Opening Notifications settings — enable NetmonMenuBar to allow alerts."
     open "x-apple.systempreferences:com.apple.preference.notifications"

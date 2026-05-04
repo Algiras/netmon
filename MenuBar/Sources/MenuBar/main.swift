@@ -75,18 +75,24 @@ class NetmonMenuBar: NSObject {
 
     override init() {
         super.init()
-        setButton("⚡", color: .white)
+        setButton("⚡")
         statusItem.menu = NSMenu()
         startPolling()
     }
 
-    private func setButton(_ text: String, color: NSColor) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: color,
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
-            .baselineOffset: 0.5,
-        ]
-        statusItem.button?.attributedTitle = NSAttributedString(string: text, attributes: attrs)
+    private func setButton(_ text: String, color: NSColor? = nil) {
+        if let color {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: color,
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
+                .baselineOffset: 0.5,
+            ]
+            statusItem.button?.attributedTitle = NSAttributedString(string: text, attributes: attrs)
+        } else {
+            // No explicit color — let the system use the default menu bar tint (works in both light and dark mode)
+            statusItem.button?.attributedTitle = NSAttributedString(string: "")
+            statusItem.button?.title = text
+        }
     }
 
     private func startPolling() {
@@ -126,7 +132,7 @@ class NetmonMenuBar: NSObject {
             setButton("⚡ \(count)", color: color)
         } else {
             let label = autonomousMode ? "⚡ 🤖" : "⚡"
-            setButton(label, color: autonomousMode ? .systemGreen : .white)
+            setButton(label, color: autonomousMode ? .systemGreen : nil)
         }
 
         // Rebuild menu
