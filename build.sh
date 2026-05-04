@@ -17,7 +17,10 @@ xcrun swiftc -sdk "$SDK" \
   -o "$BINARY"
 
 if [ -f "$BINARY" ]; then
+    mkdir -p "$APP/Contents/Resources"
     cp "$NETMON/MenuBar/Info.plist" "$APP/Contents/Info.plist"
+    [ -f "$NETMON/MenuBar/Assets/netmon.icns" ] && \
+        cp "$NETMON/MenuBar/Assets/netmon.icns" "$APP/Contents/Resources/netmon.icns"
     codesign --force --deep --sign - "$APP" 2>/dev/null
     echo "✓ Binary: $BINARY"
     echo ""

@@ -20,5 +20,7 @@
   <string>alert</string>
   <key>NSUserNotificationsUsageDescription</key>
   <string>netmon sends alerts for suspicious network activity.</string>
+  <key>CFBundleIconFile</key>
+  <string>netmon</string>
 </dict>
 </plist>

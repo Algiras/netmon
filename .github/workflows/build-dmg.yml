@@ -14,10 +14,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate app icon
+        run: |
+          pip install -q Pillow
+          python3 scripts/make_icon.py
+
       - name: Build NetmonMenuBar.app
         run: |
           SDK=$(xcrun --sdk macosx --show-sdk-path)
           mkdir -p NetmonMenuBar.app/Contents/MacOS
+          mkdir -p NetmonMenuBar.app/Contents/Resources
 
           xcrun swiftc -sdk "$SDK" \
             -framework Foundation -framework AppKit -framework UserNotifications \
@@ -27,6 +38,7 @@ jobs:
             -o NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar
 
           cp MenuBar/Info.plist NetmonMenuBar.app/Contents/Info.plist
+          cp MenuBar/Assets/netmon.icns NetmonMenuBar.app/Contents/Resources/netmon.icns
           codesign --force --deep --sign - NetmonMenuBar.app
 
       - name: Create DMG

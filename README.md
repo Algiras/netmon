@@ -1,24 +1,49 @@
-# netmon
+# ⚡ netmon
 
-Local network anomaly monitor for macOS — detects suspicious outbound connections using a local LLM with tool calling, RAG short-term memory, a menu bar agent, and a web review panel.
+[![Build DMG](https://github.com/Algiras/netmon/actions/workflows/build-dmg.yml/badge.svg)](https://github.com/Algiras/netmon/actions/workflows/build-dmg.yml)
+
+Local network anomaly monitor for macOS. Detects suspicious outbound connections using a **local LLM with tool calling**, RAG short-term memory, a native menu bar agent, and a dark-theme web review panel — everything runs on-device, no cloud required.
+
+---
 
 ## How it works
 
 ```
-lsof (every 60s) → anomalies.log → LLM analyzer (every 5 min) → notifications + panel
+lsof (60s) ──► anomalies.log ──► analyze.py (5 min) ──► notifications
+                                       │                       │
+                               embed + RAG lookup         panel UI
+                               (nomic-embed-text)    localhost:6543
+                                       │
+                               Ollama LLM (tool calls)
+                               granite4.1:3b / llama3.2 / …
+                               ├─ send_notification   → queues for review
+                               ├─ auto_resolve        → autonomous confirm/reject
+                               └─ mark_as_normal      → adds to baseline
 ```
 
-1. **monitor.sh** — diffs `lsof -i 4` against a known-good baseline every 60 s; writes new connections to `anomalies.log`
-2. **analyze.py** — reads new anomalies, embeds each with `nomic-embed-text-v2-moe`, retrieves similar past events (RAG), then calls a local Ollama LLM with tool calling to decide: alert, confirm, or reject
-3. **panel.py** — web UI at `http://localhost:6543` for reviewing/confirming/rejecting flagged events
-4. **NetmonMenuBar** — macOS menu bar app showing `⚡ N` badge for pending alerts; inline confirm/reject; Autonomous Mode toggle
+### Components
+
+| Component | What it does |
+|-----------|-------------|
+| `monitor.sh` | Polls `lsof -i 4` every 60 s, diffs against `baseline.txt`, writes `[ANOMALY]` lines |
+| `analyze.py` | Reads new anomalies, embeds with Ollama, retrieves similar past events (RAG), calls LLM |
+| `db.py` | SQLite event store with in-process cosine-similarity vector search |
+| `embed.py` | Thin wrapper around `POST /api/embed` — model configurable |
+| `panel.py` | Dark-theme HTTP review panel at `localhost:6543` |
+| `MenuBar/` | Swift menu bar app — `⚡ N` badge, inline confirm/reject, mode toggle |
+| `build.sh` | Compile Swift app + reload LaunchAgents |
+| `install.sh` | One-shot first-run setup |
+
+---
 
 ## Requirements
 
-- macOS 13+
-- [Ollama](https://ollama.com) with at least one tool-capable model
-- Python 3.10+ (Homebrew recommended)
-- Xcode Command Line Tools (`xcode-select --install`)
+- macOS 13 Ventura or later
+- [Ollama](https://ollama.com) (at least one tool-capable model)
+- Python 3.10+ — Homebrew recommended (`brew install python`)
+- Xcode Command Line Tools — `xcode-select --install`
+
+---
 
 ## Install
 
@@ -27,49 +52,79 @@ git clone https://github.com/Algiras/netmon ~/.netmon
 bash ~/.netmon/install.sh
 ```
 
-`install.sh` pulls the default models, writes LaunchAgent plists, and builds the Swift menu bar app. All four agents start at login automatically via `RunAtLoad`.
+`install.sh`:
+1. Pulls `granite4.1:3b` and `nomic-embed-text-v2-moe` from Ollama
+2. Writes four LaunchAgent plists to `~/Library/LaunchAgents/`
+3. Builds the Swift menu bar app
+4. Loads all agents — they will restart automatically at every login
+
+After install you'll see `⚡` in your menu bar and the panel at http://localhost:6543.
+
+---
 
 ## Models
 
-Any Ollama model with tool-calling support works. Default: `granite4.1:3b`.
+netmon uses two separate models, both configurable from the panel:
 
-Switch model in the panel UI or via:
+| Role | Default | Config key |
+|------|---------|------------|
+| **LLM** (analysis + tool calls) | `granite4.1:3b` | `llm_model` |
+| **Embedding** (RAG memory) | `nomic-embed-text-v2-moe` | `embed_model` |
+
+The panel's model bar shows only models that support the required capability (`tools` for LLM, `embedding` for vectors). Any Ollama model works.
+
+> **Note:** Changing the embedding model clears all stored embeddings — the panel shows a confirmation dialog before doing so. Vectors computed with different models are incompatible.
+
+Switch via API:
 ```bash
+# Change LLM
 curl -X POST http://localhost:6543/config \
   -H "Content-Type: application/json" \
-  -d '{"model": "llama3.2:3b"}'
+  -d '{"llm_model": "llama3.2:3b"}'
+
+# Change embedding model (clears stored vectors)
+curl -X POST http://localhost:6543/config \
+  -H "Content-Type: application/json" \
+  -d '{"embed_model": "nomic-embed-text:latest", "_clear_embeddings": true}'
 ```
 
-Tested models: `granite4.1:3b`, `llama3.2:3b`, `qwen3.5:2b`, `gemma4:31b-cloud`, `mistral-large-3:675b-cloud`
+Tested LLMs: `granite4.1:3b` · `llama3.2:3b` · `qwen3.5:2b` · `gemma4:31b-cloud` · `mistral-large-3:675b-cloud`
+
+---
 
 ## Modes
 
 | Mode | Behaviour |
 |------|-----------|
-| **Review** (default) | LLM flags events → you confirm/reject in panel or notification |
-| **Autonomous** | LLM auto-confirms benign traffic and auto-rejects suspicious — no human needed per event |
+| **Review** (default) | LLM flags events → you confirm/reject via notification buttons or panel |
+| **Autonomous** | LLM calls `auto_resolve` directly — benign traffic confirmed, suspicious rejected, no human step |
 
-Toggle via the `⚡` menu bar icon or the panel button.
+Toggle via `⚡` menu bar → `👁 Review Mode / 🤖 Autonomous: ON`, or the green button in the panel.
 
-## Files
+---
 
-| File | Purpose |
-|------|---------|
-| `monitor.sh` | Polls `lsof`, writes anomalies |
-| `analyze.py` | LLM analysis loop with RAG |
-| `db.py` | SQLite event store + cosine similarity search |
-| `embed.py` | Ollama embedding wrapper |
-| `panel.py` | HTTP review panel |
-| `MenuBar/` | Swift menu bar app source |
-| `build.sh` | Compile Swift + reload LaunchAgents |
-| `install.sh` | First-time setup |
-| `tests/` | Unit tests (no Ollama required) |
+## LLM Tools
+
+The LLM is given three tools:
+
+| Tool | When used |
+|------|-----------|
+| `send_notification` | Suspicious event requiring human review — creates a pending alert |
+| `auto_resolve(decision="confirmed"\|"rejected")` | Autonomous mode — direct decision, no queue |
+| `mark_as_normal` | Clearly routine connection not yet in baseline — adds silently |
+
+---
 
 ## Tests
 
+No Ollama required — all network calls are mocked.
+
 ```bash
 cd ~/.netmon && python3 -m pytest tests/ -v
+# 31 passed
 ```
+
+---
 
 ## Rebuild menu bar app
 
@@ -77,11 +132,25 @@ cd ~/.netmon && python3 -m pytest tests/ -v
 bash ~/.netmon/build.sh
 ```
 
+---
+
 ## Logs
 
 ```
-~/.netmon/anomalies.log   # raw detections
-~/.netmon/analysis.log    # LLM decisions
-~/.netmon/panel.log       # panel access
-~/.netmon/menubar.err     # Swift app errors
+~/.netmon/anomalies.log    # raw lsof detections
+~/.netmon/analysis.log     # LLM decisions and summaries
+~/.netmon/menubar.err      # Swift app crash log
+~/.netmon/panel.log        # HTTP access log
 ```
+
+---
+
+## Release (DMG)
+
+GitHub Actions builds a signed DMG on every push to `main` (artifact) and on version tags (GitHub Release).
+
+```bash
+git tag v1.0.0 && git push --tags
+```
+
+The DMG contains `NetmonMenuBar.app` with a drag-to-`/Applications` installer layout.
