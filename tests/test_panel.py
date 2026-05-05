@@ -301,8 +301,9 @@ class TestGetEndpoints(unittest.TestCase):
             self.assertEqual(resp[0][0], 200)
             data = json.loads(resp[0][1])
             self.assertIn("ips", data)
-            self.assertIn("1.2.3.4", data["ips"])
-            self.assertIn("5.6.7.8", data["ips"])
+            ips = [e["ip"] for e in data["ips"]]
+            self.assertIn("1.2.3.4", ips)
+            self.assertIn("5.6.7.8", ips)
         finally:
             home_patch.stop()
 

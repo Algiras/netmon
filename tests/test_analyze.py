@@ -342,6 +342,29 @@ class TestBlockIp(unittest.TestCase):
                 analyze.block_ip("1.2.3.4", "duplicate")
             self.assertEqual(bf.read_text().count("1.2.3.4"), 1)
 
+    def test_writes_metadata(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(analyze, "BLOCKED_FILE",      Path(d) / "blocked_ips.txt"), \
+                 patch.object(analyze, "BLOCKED_META_FILE", Path(d) / "blocked_ips_meta.json"), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                analyze.block_ip("1.2.3.4", "known C2", process="chrome")
+            meta = json.loads((Path(d) / "blocked_ips_meta.json").read_text())
+            self.assertIn("1.2.3.4", meta)
+            self.assertEqual(meta["1.2.3.4"]["process"], "chrome")
+            self.assertEqual(meta["1.2.3.4"]["reason"],  "known C2")
+            self.assertIn("ts", meta["1.2.3.4"])
+
+    def test_metadata_updated_on_reblock(self):
+        with tempfile.TemporaryDirectory() as d:
+            mf = Path(d) / "blocked_ips_meta.json"
+            with patch.object(analyze, "BLOCKED_FILE",      Path(d) / "blocked_ips.txt"), \
+                 patch.object(analyze, "BLOCKED_META_FILE", mf), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                analyze.block_ip("1.2.3.4", "first block", process="curl")
+                analyze.block_ip("1.2.3.4", "re-confirmed", process="curl")
+            meta = json.loads(mf.read_text())
+            self.assertEqual(meta["1.2.3.4"]["reason"], "re-confirmed")
+
 
 class TestKillProcess(unittest.TestCase):
     def test_returns_killed_on_success(self):
@@ -388,8 +411,8 @@ class TestGetProcessInfo(unittest.TestCase):
 
     def test_dispatch_routes_block_ip(self):
         with patch("analyze.block_ip", return_value="blocked") as mock:
-            analyze.dispatch("block_ip", {"ip": "1.2.3.4", "reason": "C2"})
-        mock.assert_called_once_with(ip="1.2.3.4", reason="C2")
+            analyze.dispatch("block_ip", {"ip": "1.2.3.4", "reason": "C2", "process": "chrome"})
+        mock.assert_called_once_with(ip="1.2.3.4", reason="C2", process="chrome")
 
 
 class MockResponse:

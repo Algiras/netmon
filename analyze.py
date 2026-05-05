@@ -35,7 +35,8 @@ LOCK_FILE     = NETMON_DIR / ".analyze.lock"
 CONFIG_FILE   = NETMON_DIR / "config.json"
 PANEL_URL     = "http://localhost:6543"
 MENUBAR_BIN   = Path("/Applications/NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar")
-BLOCKED_FILE  = NETMON_DIR / "blocked_ips.txt"
+BLOCKED_FILE      = NETMON_DIR / "blocked_ips.txt"
+BLOCKED_META_FILE = NETMON_DIR / "blocked_ips_meta.json"
 OLLAMA_BASE   = "http://localhost:11434"
 
 _ip_cache: dict[str, str] = {}  # per-run cache; keyed by bare IP
@@ -278,8 +279,9 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ip":     {"type": "string", "description": "IP address to block (no port)"},
-                    "reason": {"type": "string"},
+                    "ip":      {"type": "string", "description": "IP address to block (no port)"},
+                    "reason":  {"type": "string"},
+                    "process": {"type": "string", "description": "Process name making the connection"},
                 },
                 "required": ["ip", "reason"],
             },
@@ -432,7 +434,29 @@ def kill_process(process_name: str, reason: str, force: bool = False) -> str:
         return f"error: {e}"
 
 
-def block_ip(ip: str, reason: str) -> str:
+def _update_blocked_meta(bare_ip: str, process: str, remote: str, reason: str):
+    """Atomically add/update metadata for a blocked IP."""
+    BLOCKED_META_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(BLOCKED_META_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with os.fdopen(fd, "r+") as f:
+        raw = f.read()
+        try:
+            meta = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            meta = {}
+        meta[bare_ip] = {
+            "ts":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "process": process,
+            "remote":  remote,
+            "reason":  reason,
+        }
+        f.seek(0)
+        f.write(json.dumps(meta, indent=2))
+        f.truncate()
+
+
+def block_ip(ip: str, reason: str, process: str = "") -> str:
     bare_ip = ip.split(":")[0]
     try:
         bare_ip = _validate_ip(bare_ip)
@@ -443,6 +467,8 @@ def block_ip(ip: str, reason: str) -> str:
     if bare_ip not in existing:
         with BLOCKED_FILE.open("a") as f:
             f.write(bare_ip + "\n")
+
+    _update_blocked_meta(bare_ip, process=process, remote=ip, reason=reason)
 
     # Try pfctl table update (works if netmon anchor is loaded)
     pfctl_ok = False
@@ -615,8 +641,9 @@ def dispatch(name: str, args: dict) -> str:
         )
     if name == "block_ip":
         return block_ip(
-            ip     = args.get("ip", ""),
-            reason = args.get("reason", ""),
+            ip      = args.get("ip", ""),
+            reason  = args.get("reason", ""),
+            process = args.get("process", ""),
         )
     if name == "check_ip_reputation":
         return check_ip_reputation(ip=args.get("ip", ""))
