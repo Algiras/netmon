@@ -531,6 +531,63 @@ class TestEnrichIpsSanitization(unittest.TestCase):
         self.assertLessEqual(len(lines), 101)
 
 
+class TestRecheckAutonomousPending(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        patch.object(db, "DB_PATH", Path(self._tmp.name) / "test.db").start()
+        db.init()
+        patch.object(analyze, "NETMON_DIR", Path(self._tmp.name)).start()
+        patch.object(analyze, "MENUBAR_BIN", Path("/nonexistent/MenuBar")).start()
+
+    def tearDown(self):
+        patch.stopall()
+        self._tmp.cleanup()
+
+    def test_no_pending_returns_zero(self):
+        result = analyze.recheck_autonomous_pending()
+        self.assertEqual(result, 0)
+
+    def test_resolves_pending_via_llm(self):
+        with patch("embed.embed_event", return_value=None), \
+             patch("subprocess.Popen"):
+            analyze.send_notification(
+                "bash", "1.2.3.4:4444", "Alert", "Suspicious shell", "critical",
+            )
+        self.assertEqual(len(db.get_pending()), 1)
+
+        def fake_run_with_tools(messages):
+            with patch("embed.embed_event", return_value=None):
+                analyze.auto_resolve("bash", "1.2.3.4:4444", "rejected", "reverse shell")
+            return "rejected"
+
+        with patch("analyze.run_with_tools", side_effect=fake_run_with_tools), \
+             patch("analyze.check_injection", return_value=False), \
+             patch("urllib.request.urlopen"):
+            groups = analyze.recheck_autonomous_pending()
+
+        self.assertGreater(groups, 0)
+        self.assertEqual(len(db.get_pending()), 0)
+
+    def test_recheck_prompt_forbids_send_notification(self):
+        with patch("embed.embed_event", return_value=None), \
+             patch("subprocess.Popen"):
+            analyze.send_notification("bash", "1.2.3.4:4444", "Alert", "msg", "warning")
+
+        captured_messages = []
+        def capture_messages(messages):
+            captured_messages.extend(messages)
+            return ""
+
+        with patch("analyze.run_with_tools", side_effect=capture_messages), \
+             patch("analyze.check_injection", return_value=False), \
+             patch("urllib.request.urlopen"):
+            analyze.recheck_autonomous_pending()
+
+        user_msg = next(m["content"] for m in captured_messages if m["role"] == "user")
+        self.assertIn("do NOT use send_notification", user_msg)
+        self.assertIn("RECHECK", user_msg)
+
+
 class TestProcessNameValidation(unittest.TestCase):
     def test_spaces_allowed_for_real_macos_apps(self):
         # macOS process names like "Google Chrome Helper" legitimately contain spaces

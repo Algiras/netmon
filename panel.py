@@ -254,6 +254,20 @@ class Handler(BaseHTTPRequestHandler):
                 new_ips = [ip for ip in ips if ip.strip() != bare_ip]
                 blocked_file.write_text("\n".join(new_ips) + ("\n" if new_ips else ""))
             self._respond(200, '{"ok":true}', "application/json")
+        elif self.path == "/recheck":
+            cfg = read_config()
+            if not cfg.get("autonomous_mode", False):
+                self._respond(409,
+                    '{"error":"recheck only available in autonomous mode"}',
+                    "application/json")
+                return
+            analyze_script = Path.home() / ".netmon" / "analyze.py"
+            import subprocess as _sp
+            _sp.Popen(
+                [sys.executable, str(analyze_script), "--recheck"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            self._respond(200, '{"ok":true,"message":"recheck started"}', "application/json")
         else:
             self._respond(404, "not found")
 
