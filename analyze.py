@@ -1199,6 +1199,10 @@ def recheck_autonomous_pending() -> int:
 
     submitted = 0
     for proc, events in groups.items():
+        # BLOCKED events need manual review — skip so they don't loop forever
+        events = [ev for ev in events if not ev.get("summary", "").startswith("[BLOCKED]")]
+        if not events:
+            continue
         fake_lines = [
             f"[{ev['ts']}] [ANOMALY] {ev['process']} -> {ev['remote']}"
             for ev in events
