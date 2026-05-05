@@ -153,6 +153,65 @@ class TestAutoResolveUpsert(unittest.TestCase):
         self.assertEqual(after[0]["status"], "confirmed")
 
 
+class TestSweepPendingEvents(unittest.TestCase):
+    """sweep_pending_events should auto-resolve pending events similar to decided ones."""
+
+    # A simple 4-dim unit vector — real embeddings are 768-dim but shape doesn't matter here
+    VEC_A = [1.0, 0.0, 0.0, 0.0]
+    VEC_B = [0.999, 0.045, 0.0, 0.0]  # cosine ≈ 0.999 with VEC_A
+    VEC_C = [0.0, 1.0, 0.0, 0.0]      # cosine = 0.0 with VEC_A (orthogonal)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        patch.object(db, "DB_PATH", Path(self._tmp.name) / "test.db").start()
+        db.init()
+        patch.object(analyze, "NETMON_DIR", Path(self._tmp.name)).start()
+
+    def tearDown(self):
+        patch.stopall()
+        self._tmp.cleanup()
+
+    def test_resolves_similar_pending(self):
+        # Insert a decided event and a similar pending one
+        decided = db.insert_event("dropbox", "162.125.21.2:443",
+                                  summary="confirmed CDN", embedding=self.VEC_A)
+        db.update_status(decided, "confirmed")
+        pending = db.insert_event("dropbox", "162.125.21.3:443",
+                                  embedding=self.VEC_B)
+
+        with patch("embed.embed_event", return_value=None):
+            resolved = analyze.sweep_pending_events()
+
+        self.assertEqual(resolved, 1)
+        row = next(r for r in db.get_recent() if r["id"] == pending)
+        self.assertEqual(row["status"], "confirmed")
+
+    def test_does_not_resolve_dissimilar_pending(self):
+        decided = db.insert_event("dropbox", "162.125.21.2:443",
+                                  summary="confirmed CDN", embedding=self.VEC_A)
+        db.update_status(decided, "confirmed")
+        pending = db.insert_event("ncat", "1.2.3.4:4444", embedding=self.VEC_C)
+
+        with patch("embed.embed_event", return_value=None):
+            resolved = analyze.sweep_pending_events()
+
+        self.assertEqual(resolved, 0)
+        row = next(r for r in db.get_recent() if r["id"] == pending)
+        self.assertEqual(row["status"], "pending")
+
+    def test_no_embedding_skipped(self):
+        decided = db.insert_event("slack", "52.36.1.1:443",
+                                  summary="ok", embedding=self.VEC_A)
+        db.update_status(decided, "confirmed")
+        # Pending event with NO embedding
+        no_emb = db.insert_event("slack", "52.36.1.2:443")
+
+        with patch("embed.embed_event", return_value=None):
+            resolved = analyze.sweep_pending_events()
+
+        self.assertEqual(resolved, 0)  # can't sweep without embedding
+
+
 class TestMarkAsNormal(unittest.TestCase):
     def test_appends_to_baseline(self):
         with tempfile.TemporaryDirectory() as d:

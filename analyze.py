@@ -651,18 +651,63 @@ Be accurate. False positives waste resources; false negatives miss real threats.
 Decide every event — do not skip or leave unresolved."""
 
 
+RAG_SWEEP_SIM = 0.88  # similarity threshold for auto-resolving pending events
+
+
+def sweep_pending_events() -> int:
+    """Auto-resolve pending DB events that are highly similar to already-decided events."""
+    with db._conn() as c:
+        rows = c.execute(
+            "SELECT id, process, remote FROM events "
+            "WHERE status='pending' AND embedding != ''"
+        ).fetchall()
+
+    resolved = 0
+    for row in rows:
+        vector = db.get_event_embedding(row["id"])
+        if not vector:
+            continue
+        similar = db.find_similar(vector, top_k=3, min_sim=RAG_SWEEP_SIM,
+                                  exclude_status="pending")
+        if not similar:
+            continue
+        top = similar[0]
+        decision = top["status"]
+        if decision not in ("confirmed", "rejected"):
+            continue
+        db.update_event(
+            row["id"], decision, top["severity"],
+            f"[AUTO-{decision.upper()}] Similar to past {decision} event "
+            f"(sim={top['similarity']})",
+        )
+        if decision == "confirmed":
+            mark_as_normal(row["process"], row["remote"],
+                           f"sim={top['similarity']}")
+        _log(f"[SWEEP/{decision.upper()}] {row['process']} → {row['remote']} "
+             f"(sim={top['similarity']})")
+        resolved += 1
+
+    if resolved:
+        _log(f"[SWEEP] Resolved {resolved} stale pending event(s) via RAG similarity")
+    return resolved
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
     db.init()
-    new_lines = load_new_anomalies()
 
+    # Always sweep stale pending events with RAG — runs even when no new log lines
+    if ensure_models():
+        sweep_pending_events()
+
+    new_lines = load_new_anomalies()
     if not new_lines:
-        _log("[ANALYZE] No new anomalies — skipping")
+        _log("[ANALYZE] No new anomalies")
         return
 
     if not ensure_models():
-        return  # logged inside ensure_models
+        return  # Ollama went down between sweep and now
 
     cfg      = read_config()
     auto     = cfg.get("autonomous_mode", False)

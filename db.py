@@ -128,23 +128,37 @@ def clear_embeddings():
         c.execute("UPDATE events SET embedding = ''")
 
 
+def get_event_embedding(event_id: int) -> list[float] | None:
+    """Return the stored embedding for an event, or None if absent."""
+    with _conn() as c:
+        row = c.execute("SELECT embedding FROM events WHERE id=?", (event_id,)).fetchone()
+    if not row or not row["embedding"]:
+        return None
+    try:
+        return json.loads(row["embedding"])
+    except Exception:
+        return None
+
+
 def find_similar(
     embedding: list[float],
     top_k: int = 5,
     min_sim: float = 0.72,
     exclude_status: str | None = None,
+    only_status: str | None = None,
 ) -> list[dict]:
     """Return past events with cosine similarity ≥ min_sim to the given embedding."""
     with _conn() as c:
-        query = (
+        rows = c.execute(
             "SELECT id,ts,process,remote,severity,summary,status,embedding FROM events "
             "WHERE embedding != '' ORDER BY ts DESC LIMIT 1000"
-        )
-        rows = c.execute(query).fetchall()
+        ).fetchall()
 
     hits: list[tuple[float, dict]] = []
     for row in rows:
         if exclude_status and row["status"] == exclude_status:
+            continue
+        if only_status and row["status"] != only_status:
             continue
         try:
             stored = json.loads(row["embedding"])

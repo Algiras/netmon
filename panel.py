@@ -32,6 +32,30 @@ def write_config(data: dict):
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
 
+RAG_CASCADE_SIM = 0.88  # similarity threshold for cascading manual decisions
+
+
+def _cascade_decision(event_id: int, decision: str) -> int:
+    """After a manual confirm/reject, auto-resolve similar pending events."""
+    vector = db.get_event_embedding(event_id)
+    if not vector:
+        return 0
+    similar_pending = db.find_similar(
+        vector, top_k=50, min_sim=RAG_CASCADE_SIM, only_status="pending"
+    )
+    count = 0
+    for s in similar_pending:
+        if s["id"] == event_id:
+            continue
+        db.update_event(
+            s["id"], decision, s["severity"],
+            f"[AUTO-{decision.upper()}] Cascaded from similar event #{event_id} "
+            f"(sim={s['similarity']})",
+        )
+        count += 1
+    return count
+
+
 def _ollama_available() -> bool:
     try:
         urllib.request.urlopen(
@@ -141,6 +165,8 @@ class Handler(BaseHTTPRequestHandler):
 
             if action != "revert":
                 db.update_status(int(body["id"]), action)
+                if action in ("confirmed", "rejected"):
+                    _cascade_decision(int(body["id"]), action)
 
             # If confirmed, add to baseline
             if action == "confirmed" and row:

@@ -94,6 +94,20 @@ class TestActionEndpoint(unittest.TestCase):
                 lines = [l for l in baseline.read_text().splitlines() if l != entry]
                 baseline.write_text("\n".join(lines) + ("\n" if lines else ""))
 
+    def test_confirm_cascades_to_similar_pending(self):
+        vec_a = [1.0, 0.0, 0.0, 0.0]
+        vec_b = [0.999, 0.045, 0.0, 0.0]  # cosine ≈ 0.999 with vec_a
+        # Insert event to confirm (with embedding) and a similar pending one
+        eid1 = db.insert_event("dropbox", "162.125.21.2:443", embedding=vec_a)
+        eid2 = db.insert_event("dropbox", "162.125.21.3:443", embedding=vec_b)
+
+        h = self._handler()
+        _post(h, "/action", {"id": eid1, "action": "confirmed"})
+
+        row2 = next(r for r in db.get_recent() if r["id"] == eid2)
+        self.assertEqual(row2["status"], "confirmed",
+                         "similar pending event should be cascaded to confirmed")
+
     def test_reject_sets_status(self):
         eid = db.insert_event("nc", "9.9.9.9:4444")
         h = self._handler()
