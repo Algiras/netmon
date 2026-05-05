@@ -932,6 +932,56 @@ def sweep_pending_events() -> int:
     return resolved
 
 
+# ── Autonomous recheck ─────────────────────────────────────────────────────────
+
+def recheck_autonomous_pending() -> int:
+    """
+    Re-drive the LLM on events that are still pending in autonomous mode.
+    Called after the main analysis loop (catches LLM timeouts and mistaken
+    send_notification calls) and also by the 60-second heartbeat LaunchAgent.
+    Returns the number of process groups re-submitted to the LLM.
+    """
+    pending = db.get_pending()
+    if not pending:
+        return 0
+
+    _log(f"[RECHECK] {len(pending)} event(s) still pending in autonomous mode — re-evaluating")
+
+    # Group by process, reconstruct synthetic log lines for build_context
+    groups: dict[str, list] = defaultdict(list)
+    for ev in pending:
+        groups[ev["process"]].append(ev)
+
+    submitted = 0
+    for proc, events in groups.items():
+        fake_lines = [
+            f"[{ev['ts']}] [ANOMALY] {ev['process']} -> {ev['remote']}"
+            for ev in events
+        ]
+        summary, _parsed = build_context(fake_lines)
+
+        if check_injection(summary):
+            _log(f"[RECHECK/GUARD] Injection suspected for '{proc}' — skipping")
+            continue
+
+        messages = [
+            {"role": "system", "content": SYSTEM_AUTONOMOUS},
+            {"role": "user", "content":
+                f"RECHECK: {len(events)} event(s) for '{proc}' are still pending in autonomous mode. "
+                f"They were not resolved in the previous cycle (possible LLM timeout or mistaken "
+                f"send_notification). Use auto_resolve for each one — do NOT use send_notification. "
+                f"Make a final confirmed/rejected decision for every event.\n\n{summary}"},
+        ]
+        result = run_with_tools(messages)
+        if result:
+            _log(f"[RECHECK/SUMMARY/{proc}] {result[:200]}")
+        submitted += 1
+
+    still_pending = len(db.get_pending())
+    _log(f"[RECHECK] Done — {still_pending} event(s) remain pending after recheck")
+    return submitted
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
@@ -944,6 +994,10 @@ def main():
     new_lines = load_new_anomalies()
     if not new_lines:
         _log("[ANALYZE] No new anomalies")
+        # In autonomous mode, still recheck any orphaned pending events
+        cfg = read_config()
+        if cfg.get("autonomous_mode", False) and ensure_models():
+            recheck_autonomous_pending()
         return
 
     if not ensure_models():
@@ -988,6 +1042,27 @@ def main():
         if result:
             _log(f"[SUMMARY/{proc}] {result[:300]}")
 
+    # In autonomous mode, do a follow-up recheck for anything still pending
+    # (catches cases where the LLM called send_notification instead of auto_resolve)
+    if auto:
+        sweep_pending_events()
+        if db.get_pending():
+            recheck_autonomous_pending()
+
+
+import sys as _sys
+
 
 if __name__ == "__main__":
-    main()
+    if "--recheck" in _sys.argv:
+        # Lightweight heartbeat mode: sweep + recheck pending in autonomous mode
+        import logging as _logging
+        _logging.getLogger("netmon")  # ensure logger is set up
+        db.init()
+        if ensure_models():
+            sweep_pending_events()
+            cfg = read_config()
+            if cfg.get("autonomous_mode", False):
+                recheck_autonomous_pending()
+    else:
+        main()

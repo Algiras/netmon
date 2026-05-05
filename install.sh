@@ -138,6 +138,34 @@ cat > "$AGENTS/com.user.netmon.panel.plist" << EOF
 </plist>
 EOF
 
+cat > "$AGENTS/com.user.netmon.heartbeat.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.netmon.heartbeat</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${PY}</string>
+    <string>${NETMON}/analyze.py</string>
+    <string>--recheck</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>WorkingDirectory</key>
+  <string>${NETMON}</string>
+  <key>StandardOutPath</key>
+  <string>${NETMON}/analysis.log</string>
+  <key>StandardErrorPath</key>
+  <string>${NETMON}/analyze.err</string>
+</dict>
+</plist>
+EOF
+echo "  ✓ $AGENTS/com.user.netmon.heartbeat.plist"
+
 cat > "$AGENTS/com.user.netmon.menubar.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -51,6 +51,7 @@ class PanelModel: ObservableObject {
     @Published var lastAnalyzed:   String = ""
     @Published var ipRepCache:     [String: IPRepInfo] = [:]
     @Published var blockedIPs:     [String] = []
+    @Published var isRechecking    = false
 
     func refresh() {
         fetchEvents { [weak self] r in
@@ -232,6 +233,24 @@ class PanelModel: ObservableObject {
                 self.refresh()
             }
         }
+    }
+
+    func recheck() {
+        guard autonomousMode, !isRechecking else { return }
+        isRechecking = true
+        guard let url = URL(string: "http://localhost:6543/recheck") else {
+            isRechecking = false; return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody   = "{}".data(using: .utf8)
+        URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                self?.isRechecking = false
+                self?.refresh()
+            }
+        }.resume()
     }
 
     private func postConfig(_ body: [String: String]) {
@@ -421,14 +440,40 @@ struct PanelView: View {
                     Spacer()
                 }
             } else {
-                List(model.pending, id: \.id) { e in
-                    EventRow(
-                        event:     e,
-                        ipRep:     model.ipRepCache[String(e.remote.split(separator: ":").first ?? Substring(e.remote))],
-                        onConfirm: { model.confirm(e.id) },
-                        onReject:  { model.reject(e.id) }
-                    )
-                    .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                VStack(spacing: 0) {
+                    // Recheck banner — only shown in autonomous mode
+                    if model.autonomousMode {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.clockwise.circle.fill")
+                                .foregroundStyle(.orange)
+                            Text("\(model.pending.count) event(s) pending in autonomous mode")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button(action: { model.recheck() }) {
+                                HStack(spacing: 4) {
+                                    if model.isRechecking {
+                                        ProgressView().scaleEffect(0.6)
+                                    }
+                                    Text(model.isRechecking ? "Rechecking…" : "Recheck")
+                                        .font(.caption)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent).tint(.orange)
+                            .disabled(model.isRechecking)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.08))
+                        Divider()
+                    }
+                    List(model.pending, id: \.id) { e in
+                        EventRow(
+                            event:     e,
+                            ipRep:     model.ipRepCache[String(e.remote.split(separator: ":").first ?? Substring(e.remote))],
+                            onConfirm: { model.confirm(e.id) },
+                            onReject:  { model.reject(e.id) }
+                        )
+                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                    }
                 }
             }
         }
