@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import analyze
+import db
 
 
 class TestBuildContext(unittest.TestCase):
@@ -113,6 +114,43 @@ class TestReadConfig(unittest.TestCase):
         with patch.object(analyze, "CONFIG_FILE", Path("/nonexistent/config.json")):
             cfg = analyze.read_config()
         self.assertEqual(cfg, {"autonomous_mode": False})
+
+
+class TestAutoResolveUpsert(unittest.TestCase):
+    """auto_resolve should update existing pending events rather than insert duplicates."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dbfile = Path(self._tmp.name) / "test.db"
+        patch.object(db, "DB_PATH", self._dbfile).start()
+        db.init()
+        patch.object(analyze, "NETMON_DIR", Path(self._tmp.name)).start()
+
+    def tearDown(self):
+        patch.stopall()
+        self._tmp.cleanup()
+
+    def test_upserts_existing_pending(self):
+        # Pre-insert a pending event (simulating send_notification path)
+        eid = db.insert_event("slack", "52.36.201.45:443")
+        self.assertEqual(db.get_pending()[0]["status"], "pending")
+
+        with patch("embed.embed_event", return_value=None):
+            analyze.auto_resolve("slack", "52.36.201.45:443", "confirmed", "Slack CDN")
+
+        pending = db.get_pending()
+        self.assertEqual(len(pending), 0, "pending event should have been resolved")
+        recent = db.get_recent(limit=5)
+        resolved = next(r for r in recent if r["id"] == eid)
+        self.assertEqual(resolved["status"], "confirmed")
+
+    def test_inserts_new_when_no_pending(self):
+        before = len(db.get_recent())
+        with patch("embed.embed_event", return_value=None):
+            analyze.auto_resolve("chrome", "8.8.8.8:443", "confirmed", "Google DNS")
+        after = db.get_recent()
+        self.assertEqual(len(after), before + 1)
+        self.assertEqual(after[0]["status"], "confirmed")
 
 
 class TestMarkAsNormal(unittest.TestCase):
