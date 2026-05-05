@@ -34,6 +34,8 @@ MENUBAR_BIN   = Path("/Applications/NetmonMenuBar.app/Contents/MacOS/NetmonMenuB
 BLOCKED_FILE  = NETMON_DIR / "blocked_ips.txt"
 OLLAMA_BASE   = "http://localhost:11434"
 
+_ip_cache: dict[str, str] = {}  # per-run cache; keyed by bare IP
+
 
 def read_config() -> dict:
     try:
@@ -213,6 +215,25 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_ip_reputation",
+            "description": (
+                "Look up geolocation, ISP/org, ASN, hosting flag, and optional abuse score "
+                "for a remote IP address. Call this before deciding on unfamiliar IPs to "
+                "distinguish known-good cloud/CDN providers from suspicious hosting. "
+                "Returns: country, ISP, org, ASN, reverse DNS, hosting flag, abuse score (if key configured)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ip": {"type": "string", "description": "IP address (port will be stripped automatically)"},
+                },
+                "required": ["ip"],
+            },
+        },
+    },
 ]
 
 
@@ -373,6 +394,121 @@ def block_ip(ip: str, reason: str) -> str:
     return status
 
 
+def check_ip_reputation(ip: str) -> str:
+    bare_ip = ip.split(":")[0]
+    try:
+        bare_ip = _validate_ip(bare_ip)
+    except ValueError as e:
+        return str(e)
+
+    if bare_ip in _ip_cache:
+        return _ip_cache[bare_ip]
+
+    lines: list[str] = []
+
+    # ip-api.com — free, no key, batch-capable
+    try:
+        payload = json.dumps([{"query": bare_ip, "fields": "status,country,isp,org,as,reverse,hosting"}]).encode()
+        req = urllib.request.Request(
+            "http://ip-api.com/batch",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=6) as r:
+            results = json.loads(r.read())
+        d = results[0] if results else {}
+        if d.get("status") == "success":
+            lines.append(f"Country: {d.get('country', '?')}")
+            lines.append(f"ISP: {d.get('isp', '?')}")
+            lines.append(f"Org: {d.get('org', '?')}")
+            lines.append(f"ASN: {d.get('as', '?')}")
+            rdns = d.get("reverse", "")
+            if rdns:
+                lines.append(f"Reverse DNS: {rdns}")
+            lines.append(f"Hosting/datacenter: {d.get('hosting', False)}")
+        else:
+            lines.append(f"ip-api.com: {d.get('message', 'no data')}")
+    except Exception as e:
+        lines.append(f"ip-api.com error: {e}")
+
+    # AbuseIPDB — optional; requires abuseipdb_key in config.json
+    key = read_config().get("abuseipdb_key", "")
+    if key:
+        try:
+            req2 = urllib.request.Request(
+                f"https://api.abuseipdb.com/api/v2/check?ipAddress={bare_ip}&maxAgeInDays=90",
+                headers={"Key": key, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req2, timeout=6) as r:
+                abuse = json.loads(r.read()).get("data", {})
+            score = abuse.get("abuseConfidenceScore", 0)
+            reports = abuse.get("totalReports", 0)
+            lines.append(f"Abuse score: {score}% ({reports} reports)")
+        except Exception as e:
+            lines.append(f"AbuseIPDB error: {e}")
+
+    result = "\n".join(lines) if lines else f"No data for {bare_ip}"
+    _ip_cache[bare_ip] = result
+    _log(f"[IPINFO] {bare_ip}: {lines[0] if lines else 'no data'}")
+    return result
+
+
+def _enrich_ips(parsed: list[dict]) -> str:
+    """
+    Batch-query ip-api.com for all unique IPs in this analysis cycle.
+    Returns a formatted block to inject into the LLM context.
+    """
+    unique_ips: list[str] = []
+    seen: set[str] = set()
+    for ev in parsed:
+        bare = ev["remote"].split(":")[0]
+        try:
+            bare = _validate_ip(bare)
+        except ValueError:
+            continue
+        if bare not in seen:
+            seen.add(bare)
+            unique_ips.append(bare)
+
+    if not unique_ips:
+        return ""
+
+    # Single batch request for all IPs
+    lines_out: list[str] = ["── IP Reputation (ip-api.com) ──"]
+    try:
+        payload = json.dumps([
+            {"query": ip, "fields": "status,country,isp,org,as,hosting"}
+            for ip in unique_ips
+        ]).encode()
+        req = urllib.request.Request(
+            "http://ip-api.com/batch",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            results = json.loads(r.read())
+        for ip, d in zip(unique_ips, results):
+            if d.get("status") == "success":
+                hosting = " [HOSTING]" if d.get("hosting") else ""
+                entry = (
+                    f"  {ip}: {d.get('country','?')} | "
+                    f"{d.get('isp','?')} | "
+                    f"{d.get('org','?')} | "
+                    f"{d.get('as','?')}{hosting}"
+                )
+            else:
+                entry = f"  {ip}: no data"
+            lines_out.append(entry)
+            # Populate per-IP cache so subsequent tool calls are free
+            _ip_cache[ip] = entry.strip()
+    except Exception as e:
+        lines_out.append(f"  (batch lookup failed: {e})")
+
+    return "\n".join(lines_out)
+
+
 def dispatch(name: str, args: dict) -> str:
     if isinstance(args, str):
         try:
@@ -413,6 +549,8 @@ def dispatch(name: str, args: dict) -> str:
             ip     = args.get("ip", ""),
             reason = args.get("reason", ""),
         )
+    if name == "check_ip_reputation":
+        return check_ip_reputation(ip=args.get("ip", ""))
     return f"unknown tool: {name}"
 
 
@@ -499,10 +637,18 @@ def check_injection(context: str) -> bool:
 
 # ── Ollama ─────────────────────────────────────────────────────────────────────
 
-def chat(messages: list, tools: list | None = None, timeout: int = 90, model: str = "") -> dict:
-    payload: dict = {"model": model or read_config().get("llm_model", "granite4.1:3b"), "messages": messages, "stream": False}
+_THINKING_MODELS = ("qwen3", "deepseek-r1", "deepseek-r2")
+
+
+def chat(messages: list, tools: list | None = None, timeout: int = 180, model: str = "") -> dict:
+    active_model = model or read_config().get("llm_model", "granite4.1:3b")
+    payload: dict = {"model": active_model, "messages": messages, "stream": False}
     if tools:
         payload["tools"] = tools
+    # Disable extended thinking for models that support it — analysis calls favour
+    # low latency over deep reasoning; thinking can 10x response time on small models.
+    if any(t in active_model for t in _THINKING_MODELS):
+        payload["think"] = False
     req = urllib.request.Request(
         OLLAMA_URL,
         data=json.dumps(payload).encode(),
@@ -642,6 +788,11 @@ def build_context(lines: list[str]) -> tuple[str, list[dict]]:
         lines_out.append("\n── Similar past events (RAG memory) ──")
         lines_out.extend(dict.fromkeys(rag_snippets))  # deduplicate, preserve order
 
+    ip_reputation = _enrich_ips(parsed)
+    if ip_reputation:
+        lines_out.append("")
+        lines_out.append(ip_reputation)
+
     return "\n".join(lines_out), parsed
 
 
@@ -663,6 +814,7 @@ Decision guide:
   - AI agent tooling calling unexpected APIs
 • mark_as_normal: when a connection is clearly routine but not yet in baseline.
 • get_process_info: call FIRST when the process is unfamiliar or the behavior needs more context.
+• check_ip_reputation: call for unfamiliar IPs to determine if they belong to known cloud/CDN providers or suspicious hosting.
 • kill_process: only if a process is actively exfiltrating or clearly malicious.
 • block_ip: only for confirmed malicious IPs, not just unusual ones.
 
@@ -684,6 +836,7 @@ For every event call exactly one tool:
 • send_notification: ONLY for critical active threats needing immediate human attention
   (e.g. data exfiltration in progress, known malware IPs, reverse shell indicators).
 • get_process_info: call when you need more context before acting.
+• check_ip_reputation: call for unfamiliar IPs — hosting/datacenter flag and org name are key signals.
 • kill_process: use when a process is actively exfiltrating — confirm first with get_process_info.
 • block_ip: use for confirmed malicious IPs; prefer over kill when the process is legitimate but the IP is not.
 

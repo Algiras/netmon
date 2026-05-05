@@ -159,5 +159,14 @@ def list_available_models() -> str:
     return "\n\n".join(parts) if parts else "No models found."
 
 
+@mcp.tool()
+def get_ip_reputation(ip: str) -> str:
+    """Look up geolocation, ISP/org, ASN, and hosting flag for an IP address via ip-api.com."""
+    import sys
+    sys.path.insert(0, str(Path.home() / ".netmon"))
+    import analyze
+    return analyze.check_ip_reputation(ip)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

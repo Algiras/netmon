@@ -3,6 +3,23 @@ import SwiftUI
 
 // ── Data models ───────────────────────────────────────────────────────────────
 
+struct IPRepInfo {
+    let country: String
+    let isp: String
+    let org: String
+    let asn: String
+    let isHosting: Bool
+
+    var badge: String {
+        var parts: [String] = []
+        if !country.isEmpty { parts.append(country) }
+        let label = org.isEmpty ? isp : org
+        if !label.isEmpty { parts.append(label) }
+        if isHosting { parts.append("Datacenter") }
+        return parts.joined(separator: " · ")
+    }
+}
+
 struct ModelEntry: Decodable, Hashable {
     let name: String
     let size: String
@@ -19,27 +36,34 @@ struct OllamaModels: Decodable {
 
 @MainActor
 class PanelModel: ObservableObject {
-    @Published var pending:       [Event] = []
-    @Published var recent:        [Event] = []
-    @Published var autonomousMode = false
-    @Published var llmModels:     [ModelEntry] = []
-    @Published var embedModels:   [ModelEntry] = []
-    @Published var selectedLLM    = ""
-    @Published var selectedEmbed  = ""
+    @Published var pending:        [Event] = []
+    @Published var recent:         [Event] = []
+    @Published var autonomousMode  = false
+    @Published var llmModels:      [ModelEntry] = []
+    @Published var embedModels:    [ModelEntry] = []
+    @Published var selectedLLM     = ""
+    @Published var selectedEmbed   = ""
     @Published var ollamaAvailable = true
     @Published var isResolving     = false
     @Published var resolveLog:     [String] = []
     @Published var isPulling       = false
     @Published var pullLog:        [String] = []
+    @Published var lastAnalyzed:   String = ""
+    @Published var ipRepCache:     [String: IPRepInfo] = [:]
 
     func refresh() {
         fetchEvents { [weak self] r in
             guard let self, let r else { return }
-            self.pending       = r.pending
-            self.recent        = r.recent
+            self.pending        = r.pending
+            self.recent         = r.recent
             self.autonomousMode = r.config?.autonomous_mode ?? self.autonomousMode
             if let m = r.config?.llm_model,   !m.isEmpty { self.selectedLLM   = m }
             if let m = r.config?.embed_model, !m.isEmpty { self.selectedEmbed = m }
+            // Fetch IP reputation for all unique pending IPs
+            let ips = Set(r.pending.map { $0.remote.split(separator: ":").first.map(String.init) ?? $0.remote })
+            for ip in ips where self.ipRepCache[ip] == nil {
+                self.fetchIPReputation(ip)
+            }
         }
         guard let url = URL(string: "http://localhost:6543/api/models") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
@@ -53,6 +77,34 @@ class PanelModel: ObservableObject {
                 if self.selectedEmbed.isEmpty, let first = m.embed.first  { self.selectedEmbed = first.name }
             }
         }.resume()
+        refreshLastAnalyzed()
+    }
+
+    private func fetchIPReputation(_ ip: String) {
+        guard let url = URL(string: "http://ip-api.com/json/\(ip)?fields=status,country,isp,org,as,hosting") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (obj["status"] as? String) == "success" else { return }
+            let info = IPRepInfo(
+                country:   obj["country"]  as? String ?? "",
+                isp:       obj["isp"]      as? String ?? "",
+                org:       obj["org"]      as? String ?? "",
+                asn:       obj["as"]       as? String ?? "",
+                isHosting: obj["hosting"]  as? Bool   ?? false
+            )
+            DispatchQueue.main.async { self.ipRepCache[ip] = info }
+        }.resume()
+    }
+
+    private func refreshLastAnalyzed() {
+        DispatchQueue.global().async {
+            let logPath = NSHomeDirectory() + "/.netmon/analysis.log"
+            guard let lines = try? String(contentsOfFile: logPath, encoding: .utf8).components(separatedBy: "\n"),
+                  let last  = lines.reversed().first(where: { $0.contains("[ANALYZE") || $0.contains("[AUTO") || $0.contains("[SWEEP") }) else { return }
+            let ts = String(last.prefix(21).dropFirst())  // "[YYYY-MM-DD HH:MM:SS]"
+            DispatchQueue.main.async { self.lastAnalyzed = ts }
+        }
     }
 
     func confirm(_ id: Int) {
@@ -169,6 +221,7 @@ class PanelModel: ObservableObject {
 
 struct EventRow: View {
     let event: Event
+    var ipRep:    IPRepInfo? = nil
     var onConfirm: (() -> Void)? = nil
     var onReject:  (() -> Void)? = nil
     var onRevert:  (() -> Void)? = nil
@@ -182,6 +235,19 @@ struct EventRow: View {
                 Text(event.remote).foregroundStyle(.secondary)
                 Spacer()
                 Text(String(event.ts.prefix(16))).font(.caption).foregroundStyle(.tertiary)
+            }
+            // IP reputation badge
+            if let rep = ipRep, !rep.badge.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: rep.isHosting ? "server.rack" : "globe")
+                        .font(.caption2)
+                    Text(rep.badge)
+                        .font(.caption2)
+                }
+                .foregroundStyle(rep.isHosting ? Color.orange : Color.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(rep.isHosting ? Color.orange.opacity(0.1) : Color.secondary.opacity(0.08))
+                .cornerRadius(4)
             }
             if !event.summary.isEmpty {
                 Text(event.summary)
@@ -213,6 +279,9 @@ struct EventRow: View {
             }
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(severityTint(event.severity))
+        .cornerRadius(6)
     }
 
     private func icon(_ s: String) -> String {
@@ -224,6 +293,14 @@ struct EventRow: View {
         case "confirmed": return .green
         case "rejected":  return .red
         default:          return .secondary
+        }
+    }
+
+    private func severityTint(_ s: String) -> Color {
+        switch s {
+        case "critical": return Color.red.opacity(0.07)
+        case "warning":  return Color.orange.opacity(0.05)
+        default:         return Color.clear
         }
     }
 }
@@ -255,6 +332,11 @@ struct PanelView: View {
                     .foregroundStyle(.orange).font(.subheadline)
             }
             Spacer()
+            if !model.lastAnalyzed.isEmpty {
+                Text("Last run \(model.lastAnalyzed)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
             Button(action: { model.toggleMode() }) {
                 Label(
                     model.autonomousMode ? "🤖 Autonomous" : "👁 Review",
@@ -301,22 +383,38 @@ struct PanelView: View {
                 }
             } else {
                 List(model.pending, id: \.id) { e in
-                    EventRow(event: e,
-                             onConfirm: { model.confirm(e.id) },
-                             onReject:  { model.reject(e.id) })
-                    Divider()
+                    EventRow(
+                        event:     e,
+                        ipRep:     model.ipRepCache[String(e.remote.split(separator: ":").first ?? Substring(e.remote))],
+                        onConfirm: { model.confirm(e.id) },
+                        onReject:  { model.reject(e.id) }
+                    )
+                    .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
                 }
             }
         }
     }
 
     private var historyTab: some View {
-        List(model.recent, id: \.id) { e in
-            EventRow(
-                event:    e,
-                onRevert: e.status != "pending" ? { model.revert(e.id) } : nil
-            )
-            Divider()
+        Group {
+            if model.recent.isEmpty {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "clock.arrow.circlepath").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("No history yet").foregroundStyle(.secondary)
+                    Text("Resolved events will appear here.")
+                        .font(.caption).foregroundStyle(.tertiary)
+                    Spacer()
+                }
+            } else {
+                List(model.recent, id: \.id) { e in
+                    EventRow(
+                        event:    e,
+                        onRevert: e.status != "pending" ? { model.revert(e.id) } : nil
+                    )
+                    .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                }
+            }
         }
     }
 

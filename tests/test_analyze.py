@@ -365,5 +365,57 @@ class TestGetProcessInfo(unittest.TestCase):
         mock.assert_called_once_with(ip="1.2.3.4", reason="C2")
 
 
+class MockResponse:
+    """Minimal context-manager shim for urllib.request.urlopen returns."""
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+
+class TestCheckIpReputation(unittest.TestCase):
+    def setUp(self):
+        # Clear the module-level cache so tests are isolated from each other
+        analyze._ip_cache.clear()
+
+    def test_returns_isp_info(self):
+        fake_response = json.dumps([{
+            "status": "success",
+            "country": "United States",
+            "isp": "Amazon.com",
+            "org": "AMAZON-02",
+            "as": "AS16509 Amazon.com, Inc.",
+            "hosting": True,
+        }]).encode()
+        with patch("urllib.request.urlopen", return_value=MockResponse(fake_response)):
+            result = analyze.check_ip_reputation("3.91.112.114")
+        self.assertIn("Amazon", result)
+        self.assertIn("hosting", result.lower())
+
+    def test_strips_port(self):
+        fake_response = json.dumps([{
+            "status": "success",
+            "country": "US",
+            "isp": "Test ISP",
+            "org": "Test Org",
+            "as": "AS1234",
+            "hosting": False,
+        }]).encode()
+        with patch("urllib.request.urlopen", return_value=MockResponse(fake_response)):
+            result = analyze.check_ip_reputation("1.2.3.4:443")
+        self.assertIn("Test ISP", result)
+
+    def test_rejects_invalid_ip(self):
+        result = analyze.check_ip_reputation("not-an-ip")
+        self.assertIn("rejected", result.lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -102,7 +102,7 @@ def list_ollama_models() -> dict:
 # ── HTTP handler ───────────────────────────────────────────────────────────────
 
 _ALLOWED_ACTIONS     = {"confirmed", "rejected", "revert", "pending"}
-_ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model"}
+_ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model", "abuseipdb_key"}
 _MODEL_RE            = re.compile(r"^[\w][\w.\-:/]{0,100}$")
 MAX_BODY             = 65_536  # 64 KB — enough for any legitimate panel request
 
