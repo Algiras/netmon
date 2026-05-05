@@ -116,10 +116,20 @@ def _write_blocked_meta(bare_ip: str, process: str, remote: str, reason: str):
     _BLOCKED_META_FILE.write_text(json.dumps(meta, indent=2))
 
 
+import ipaddress as _ipmod
+
+# Explicit RFC1918 ranges — avoids Python 3.11+ is_private including TEST-NET ranges.
+_PRIVATE_NETWORKS = tuple(_ipmod.ip_network(n) for n in (
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7",
+))
+
+
 def _do_block_ip(bare_ip: str, process: str, remote: str, reason: str):
     """Add bare_ip to blocked_ips.txt + metadata. Calls pfctl if pf_enforcement is on.
-    Raises ValueError if the IP is loopback, private, link-local, or unspecified."""
-    import ipaddress as _ipmod
+    Raises ValueError if the IP is loopback, RFC1918 private, link-local, or unspecified."""
     import subprocess as _sp
     try:
         _addr = _ipmod.ip_address(bare_ip)
@@ -127,7 +137,7 @@ def _do_block_ip(bare_ip: str, process: str, remote: str, reason: str):
         raise ValueError(f"Invalid IP address: {bare_ip!r}")
     if _addr.is_loopback:
         raise ValueError(f"Blocking loopback address rejected: {bare_ip!r}")
-    if _addr.is_private:
+    if any(_addr in net for net in _PRIVATE_NETWORKS):
         raise ValueError(f"Blocking private/RFC1918 address rejected: {bare_ip!r}")
     if _addr.is_link_local:
         raise ValueError(f"Blocking link-local address rejected: {bare_ip!r}")

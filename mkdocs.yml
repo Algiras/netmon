@@ -108,6 +108,7 @@ nav:
   - API Reference: api-reference.md
   - MCP Integration: mcp.md
   - Architecture: architecture.md
+  - Verification: verify.md
   - Troubleshooting: troubleshooting.md
   - Glossary: glossary.md
 

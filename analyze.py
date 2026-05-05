@@ -678,16 +678,28 @@ def _validate_process_name(name: str) -> str:
     return stripped
 
 
+# Explicit RFC1918 / special-use ranges to reject for blocking.
+# We intentionally do NOT use addr.is_private — Python 3.11+ includes
+# TEST-NET documentation ranges (192.0.2/24, 198.51.100/24, 203.0.113/24)
+# which are routable in tests and should not be rejected.
+_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7",   # IPv6 ULA
+))
+
+
 def _validate_ip(ip: str) -> str:
     """Raise ValueError for anything that is not a valid IPv4/IPv6 address (port already stripped).
-    Also rejects loopback, private, link-local, and unspecified addresses."""
+    Also rejects loopback, RFC1918 private, link-local, and unspecified addresses."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         raise ValueError(f"Unsafe IP rejected: {ip!r}")
     if addr.is_loopback:
         raise ValueError(f"Blocking loopback address rejected: {ip!r}")
-    if addr.is_private:
+    if any(addr in net for net in _PRIVATE_NETWORKS):
         raise ValueError(f"Blocking private/RFC1918 address rejected: {ip!r}")
     if addr.is_link_local:
         raise ValueError(f"Blocking link-local address rejected: {ip!r}")
