@@ -68,7 +68,7 @@ def _write_blocked_meta(bare_ip: str, process: str, remote: str, reason: str):
 
 
 def _do_block_ip(bare_ip: str, process: str, remote: str, reason: str):
-    """Add bare_ip to blocked_ips.txt + metadata. Best-effort pfctl."""
+    """Add bare_ip to blocked_ips.txt + metadata. Calls pfctl if pf_enforcement is on."""
     import subprocess as _sp
     blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
     existing = set(blocked_file.read_text().splitlines()) if blocked_file.exists() else set()
@@ -76,11 +76,12 @@ def _do_block_ip(bare_ip: str, process: str, remote: str, reason: str):
         with blocked_file.open("a") as f:
             f.write(bare_ip + "\n")
     _write_blocked_meta(bare_ip, process=process, remote=remote, reason=reason)
-    try:
-        _sp.run(["pfctl", "-t", "netmon_blocked", "-T", "add", bare_ip],
-                capture_output=True, timeout=5)
-    except Exception:
-        pass
+    if read_config().get("pf_enforcement", False):
+        try:
+            _sp.run(["sudo", "pfctl", "-t", "netmon_blocked", "-T", "add", bare_ip],
+                    capture_output=True, timeout=5)
+        except Exception:
+            pass
 
 
 def _cascade_decision(event_id: int, decision: str) -> int:
@@ -134,7 +135,7 @@ def list_ollama_models() -> dict:
 
 _ALLOWED_ACTIONS     = {"confirmed", "rejected", "revert", "pending"}
 _ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model", "abuseipdb_key",
-                        "backend", "anthropic_api_key"}
+                        "backend", "anthropic_api_key", "pf_enforcement"}
 _MODEL_RE            = re.compile(r"^[\w][\w.\-:/]{0,100}$")
 MAX_BODY             = 65_536  # 64 KB — enough for any legitimate panel request
 
@@ -172,6 +173,17 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/models":
             data = {**list_ollama_models(), "config": read_config()}
             self._respond(200, json.dumps(data), "application/json")
+        elif self.path == "/api/pf-status":
+            sudoers_ok = Path("/etc/sudoers.d/netmon").exists()
+            anchor_ok  = Path("/etc/pf.anchors/netmon").exists()
+            pf_on      = read_config().get("pf_enforcement", False)
+            self._respond(200, json.dumps({
+                "sudoers_configured": sudoers_ok,
+                "anchor_configured":  anchor_ok,
+                "enforcement_active": pf_on and sudoers_ok and anchor_ok,
+                "pf_enforcement":     pf_on,
+                "setup_script":       str(Path.home() / ".netmon" / "setup-pf.sh"),
+            }), "application/json")
         elif self.path == "/api/blocked-ips":
             blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
             meta_file    = Path.home() / ".netmon" / "blocked_ips_meta.json"
@@ -199,6 +211,12 @@ class Handler(BaseHTTPRequestHandler):
             clear_emb = body.pop("_clear_embeddings", False)
             if "toggle" in body:
                 key = body["toggle"]
+                if key == "pf_enforcement" and not cfg.get("pf_enforcement", False):
+                    if not Path("/etc/sudoers.d/netmon").exists():
+                        self._respond(409,
+                            json.dumps({"error": "pf enforcement not configured — run ~/.netmon/setup-pf.sh first"}),
+                            "application/json")
+                        return
                 if key == "autonomous_mode" and not cfg.get("autonomous_mode", False):
                     backend = cfg.get("backend", "ollama")
                     if backend == "claude":

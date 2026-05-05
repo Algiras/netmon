@@ -147,11 +147,17 @@ class PanelModel: ObservableObject {
     @Published var lastAnalyzed:   String = ""
     @Published var ipRepCache:     [String: IPRepInfo] = [:]
     @Published var blockedIPs:     [BlockedIPEntry] = []
-    @Published var isRechecking    = false
+    @Published var isRechecking      = false
+    @Published var pfEnforcement     = false
+    @Published var pfSudoersReady    = false
+    @Published var pfAnchorReady     = false
 
     var usingClaude: Bool { backendName == "claude" }
+    var pfSetupNeeded: Bool { !pfSudoersReady || !pfAnchorReady }
 
     func refresh() {
+        fetchPFStatus()
+        fetchBlockedIPs()
         fetchEvents { [weak self] r in
             guard let self, let r else { return }
             self.pending        = r.pending
@@ -179,7 +185,6 @@ class PanelModel: ObservableObject {
             }
         }.resume()
         refreshLastAnalyzed()
-        fetchBlockedIPs()
     }
 
     func fetchBlockedIPs() {
@@ -201,6 +206,41 @@ class PanelModel: ObservableObject {
                 )
             }
             DispatchQueue.main.async { self.blockedIPs = entries }
+        }.resume()
+    }
+
+    func fetchPFStatus() {
+        guard let url = URL(string: "http://localhost:6543/api/pf-status") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            DispatchQueue.main.async {
+                self.pfEnforcement  = obj["pf_enforcement"]     as? Bool ?? false
+                self.pfSudoersReady = obj["sudoers_configured"] as? Bool ?? false
+                self.pfAnchorReady  = obj["anchor_configured"]  as? Bool ?? false
+            }
+        }.resume()
+    }
+
+    func togglePFEnforcement() {
+        guard let url  = URL(string: "http://localhost:6543/config"),
+              let data = try? JSONSerialization.data(withJSONObject: ["toggle": "pf_enforcement"]) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("localhost:6543",   forHTTPHeaderField: "Host")
+        req.httpBody = data
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            guard let self else { return }
+            if let http = resp as? HTTPURLResponse, http.statusCode == 409,
+               let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let msg = obj["error"] as? String {
+                DispatchQueue.main.async { self.resolveLog = ["⚠️ \(msg)"] }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.fetchPFStatus() }
         }.resume()
     }
 
@@ -987,6 +1027,47 @@ struct PanelView: View {
                     .padding(8)
                 } label: {
                     Label("Memory  (RAG embeddings)", systemImage: "memorychip").font(.caption).foregroundStyle(.secondary)
+                }
+
+                // ── Network enforcement ───────────────────────────────────────
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if model.pfSetupNeeded {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange).font(.caption)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Setup required")
+                                        .font(.caption).fontWeight(.semibold)
+                                    Text("To enforce blocks at the firewall level, run the setup script once. It will ask for sudo to add a scoped sudoers entry and pf anchor.")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text("~/.netmon/setup-pf.sh")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .padding(.top, 2)
+                                }
+                            }
+                        } else {
+                            HStack(spacing: 8) {
+                                Toggle("Enable network enforcement (pf firewall)", isOn: Binding(
+                                    get:  { model.pfEnforcement },
+                                    set:  { _ in model.togglePFEnforcement() }
+                                ))
+                                .toggleStyle(.switch)
+                                .font(.caption)
+                            }
+                            Text(model.pfEnforcement
+                                 ? "Blocked IPs are dropped at the firewall — connections cannot be made even if the block list file is bypassed."
+                                 : "Blocks are recorded in the block list file only. Enable to also drop packets via pf.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(8)
+                } label: {
+                    Label("Network Enforcement", systemImage: "network.badge.shield.half.filled")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
                 // ── Blocked IPs ───────────────────────────────────────────────
