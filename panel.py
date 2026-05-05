@@ -34,7 +34,21 @@ def write_config(data: dict):
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
 
-RAG_CASCADE_SIM = 0.88  # similarity threshold for cascading manual decisions
+RAG_CASCADE_SIM   = 0.88
+_BLOCKED_META_FILE = Path.home() / ".netmon" / "blocked_ips_meta.json"
+
+
+def _remove_blocked_meta(bare_ip: str):
+    """Remove the metadata entry for an IP when it's unblocked."""
+    if not _BLOCKED_META_FILE.exists():
+        return
+    try:
+        meta = json.loads(_BLOCKED_META_FILE.read_text())
+        if bare_ip in meta:
+            del meta[bare_ip]
+            _BLOCKED_META_FILE.write_text(json.dumps(meta, indent=2))
+    except Exception:
+        pass
 
 
 def _cascade_decision(event_id: int, decision: str) -> int:
@@ -128,8 +142,14 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(200, json.dumps(data), "application/json")
         elif self.path == "/api/blocked-ips":
             blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
-            ips = blocked_file.read_text().splitlines() if blocked_file.exists() else []
-            self._respond(200, json.dumps({"ips": [ip for ip in ips if ip.strip()]}), "application/json")
+            meta_file    = Path.home() / ".netmon" / "blocked_ips_meta.json"
+            ips  = [ip for ip in (blocked_file.read_text().splitlines() if blocked_file.exists() else []) if ip.strip()]
+            try:
+                meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
+            except Exception:
+                meta = {}
+            entries = [{"ip": ip, **meta.get(ip, {})} for ip in ips]
+            self._respond(200, json.dumps({"ips": entries}), "application/json")
         else:
             self._respond(404, "not found")
 
@@ -216,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                     Path.home() / ".netmon" / "baseline.txt",
                     f"{row['process']}|{row['remote']}",
                 )
-                # Remove IP from blocked list if it was rejected
+                # Remove IP from blocked list + metadata if it was rejected
                 blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
                 bare_ip = row['remote'].split(":")[0]
                 if blocked_file.exists():
@@ -224,6 +244,7 @@ class Handler(BaseHTTPRequestHandler):
                     new_ips = [ip for ip in ips if ip.strip() != bare_ip]
                     if len(new_ips) != len(ips):
                         blocked_file.write_text("\n".join(new_ips) + ("\n" if new_ips else ""))
+                        _remove_blocked_meta(bare_ip)
                 self._respond(200, '{"ok":true}', "application/json")
                 return
 
@@ -241,6 +262,7 @@ class Handler(BaseHTTPRequestHandler):
                 ips = blocked_file.read_text().splitlines()
                 new_ips = [ip for ip in ips if ip.strip() != bare_ip]
                 blocked_file.write_text("\n".join(new_ips) + ("\n" if new_ips else ""))
+            _remove_blocked_meta(bare_ip)
             self._respond(200, '{"ok":true}', "application/json")
         elif self.path == "/recheck":
             cfg = read_config()

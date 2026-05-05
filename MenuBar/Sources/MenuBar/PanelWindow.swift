@@ -25,6 +25,15 @@ struct ModelEntry: Decodable, Hashable {
     let size: String
 }
 
+struct BlockedIPEntry: Identifiable {
+    let ip:      String
+    let ts:      String?
+    let process: String?
+    let remote:  String?
+    let reason:  String?
+    var id: String { ip }
+}
+
 struct OllamaModels: Decodable {
     let available: Bool
     let llm:       [ModelEntry]
@@ -137,7 +146,7 @@ class PanelModel: ObservableObject {
     @Published var pullLog:        [String] = []
     @Published var lastAnalyzed:   String = ""
     @Published var ipRepCache:     [String: IPRepInfo] = [:]
-    @Published var blockedIPs:     [String] = []
+    @Published var blockedIPs:     [BlockedIPEntry] = []
     @Published var isRechecking    = false
 
     var usingClaude: Bool { backendName == "claude" }
@@ -179,9 +188,19 @@ class PanelModel: ObservableObject {
         req.setValue("localhost:6543", forHTTPHeaderField: "Host")
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let ips = obj["ips"] as? [String] else { return }
-            DispatchQueue.main.async { self.blockedIPs = ips }
+                  let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let list = obj["ips"] as? [[String: Any]] else { return }
+            let entries = list.compactMap { d -> BlockedIPEntry? in
+                guard let ip = d["ip"] as? String else { return nil }
+                return BlockedIPEntry(
+                    ip:      ip,
+                    ts:      d["ts"]      as? String,
+                    process: d["process"] as? String,
+                    remote:  d["remote"]  as? String,
+                    reason:  d["reason"]  as? String
+                )
+            }
+            DispatchQueue.main.async { self.blockedIPs = entries }
         }.resume()
     }
 
@@ -958,13 +977,37 @@ struct PanelView: View {
                             }
                             .padding(.vertical, 2)
                         } else {
-                            ForEach(model.blockedIPs, id: \.self) { ip in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "nosign").foregroundStyle(.red).font(.caption)
-                                    Text(ip).font(.system(size: 12, design: .monospaced))
-                                    Spacer()
-                                    Button("Unblock") { model.unblockIP(ip) }
-                                        .buttonStyle(.bordered).controlSize(.mini).tint(.orange)
+                            ForEach(model.blockedIPs) { entry in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "nosign").foregroundStyle(.red).font(.caption)
+                                        Text(entry.ip)
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .fontWeight(.semibold)
+                                        Spacer()
+                                        Button("Unblock") { model.unblockIP(entry.ip) }
+                                            .buttonStyle(.bordered).controlSize(.mini).tint(.orange)
+                                    }
+                                    if let process = entry.process, !process.isEmpty {
+                                        HStack(spacing: 4) {
+                                            Text("Process:").foregroundStyle(.tertiary)
+                                            Text(process).fontWeight(.medium)
+                                        }
+                                        .font(.caption2)
+                                    }
+                                    if let reason = entry.reason, !reason.isEmpty {
+                                        Text(reason)
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                    if let ts = entry.ts, !ts.isEmpty {
+                                        Text(ts)
+                                            .font(.caption2).foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                                if entry.id != model.blockedIPs.last?.id {
+                                    Divider()
                                 }
                             }
                         }
