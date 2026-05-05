@@ -6,6 +6,7 @@
 *.err
 anomalies.log
 baseline.txt
+blocked_ips.txt
 config.json
 .analyze_cursor
 .analyze.lock
