@@ -76,6 +76,28 @@ Remove entries for processes you no longer use, or for IPs that have changed to 
 
 ---
 
+## Tamper detection
+
+Every time the baseline is modified through the panel, netmon updates `~/.netmon/baseline.sha256` with a SHA256 checksum of `baseline.txt`. On startup, `monitor.sh` compares the file against the stored checksum and sends a macOS notification if they differ.
+
+```bash
+# Manually verify the checksum
+actual=$(shasum -a 256 ~/.netmon/baseline.txt | awk '{print $1}')
+stored=$(cat ~/.netmon/baseline.sha256)
+[[ "$actual" == "$stored" ]] && echo "OK" || echo "TAMPERED"
+```
+
+If you edit `baseline.txt` directly (e.g. to bulk-remove entries), regenerate the checksum by making any change through the panel (the Add or Remove button), or by running:
+
+```bash
+shasum -a 256 ~/.netmon/baseline.txt | awk '{print $1}' > ~/.netmon/baseline.sha256
+chmod 0600 ~/.netmon/baseline.sha256
+```
+
+`verify.sh` checks the checksum as part of its security checks.
+
+---
+
 ## Baseline vs process policy
 
 The baseline silences known-good connections **after** LLM confirmation. [Process policy](../configuration/process-policy.md) enforces **expected ranges** before the LLM is ever consulted — it's a proactive control, not a learned list. Use both together: process policy for high-value AI agent processes, baseline for everything else.

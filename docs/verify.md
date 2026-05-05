@@ -1,6 +1,6 @@
 # Verification & Health Checks
 
-Run `~/.netmon/verify.sh` after install or any configuration change. It performs 27 automated checks and exits non-zero if any fail.
+Run `~/.netmon/verify.sh` after install or any configuration change. It performs 31 automated checks across runtime, security, and services, and exits non-zero if any fail.
 
 ```bash
 ~/.netmon/verify.sh
@@ -15,7 +15,7 @@ flowchart TD
     PY["Python 3.10+"]
     SYN["Syntax: all .py files"]
     IMP["Module imports"]
-    UT["Unit tests (139)"]
+    UT["Unit tests (163)"]
     PERM["File permissions 0600"]
     TAMP["Baseline tamper detection"]
     TOK["Panel token format"]
@@ -23,7 +23,9 @@ flowchart TD
     AUTH2["Panel: wrong token → 401"]
     AUTH3["Panel: correct token → 200"]
     IPVAL["IP validation correctness"]
-    LA["LaunchAgents loaded"]
+    SUDO["Sudoers file present\n+ covers tcpdump"]
+    DNS_SYN["dns_monitor.py syntax"]
+    LA["LaunchAgents loaded\n(incl. dns)"]
     BIN["Binary installed"]
     OLL["Ollama reachable"]
     PF["pf anchor status"]
@@ -32,6 +34,7 @@ flowchart TD
     PERM --> TAMP --> TOK
     AUTH1 --> AUTH2 --> AUTH3
     IPVAL
+    SUDO --> DNS_SYN
     LA --> BIN --> OLL --> PF
 ```
 
@@ -60,11 +63,19 @@ flowchart TD
 | Correct token | Panel returns **200** with valid `X-Netmon-Token` |
 | IP validation | RFC1918 rejected; TEST-NET / public IPs allowed |
 
+### DNS monitor
+
+| Check | What it verifies |
+|-------|-----------------|
+| Sudoers file | `/etc/sudoers.d/netmon` exists with mode 440 |
+| Sudoers covers tcpdump | Entry for `/usr/sbin/tcpdump -l -n udp port 53` present |
+| dns_monitor.py syntax | File compiles without errors |
+
 ### Services
 
 | Check | What it verifies |
 |-------|-----------------|
-| LaunchAgents | `com.user.netmon`, `.analyze`, `.panel`, `.menubar` all loaded |
+| LaunchAgents | `com.user.netmon`, `.analyze`, `.heartbeat`, `.dns`, `.panel`, `.menubar`, `.watchdog` all loaded |
 | Binary | `/Applications/NetmonMenuBar.app` executable present |
 | Ollama | `localhost:11434` responds within 3 seconds |
 | pf anchor | Reports whether `netmon_blocked` table is active |
@@ -86,6 +97,30 @@ flowchart TD
     If the checksum doesn't match, the file may have been modified outside the panel.
     Open the panel → Baseline tab → any action will rewrite the checksum.
     If you didn't touch it, treat this as a security alert and audit the file.
+
+=== "Sudoers / DNS monitor"
+
+    If `/etc/sudoers.d/netmon` is missing, run `install.sh` or create it manually:
+
+    ```bash
+    PFCTL=/sbin/pfctl; TCPDUMP=/usr/sbin/tcpdump; USER=$(whoami)
+    TMP=$(mktemp)
+    cat > "$TMP" << EOF
+    $USER ALL=(root) NOPASSWD: $PFCTL -t netmon_blocked -T add *
+    $USER ALL=(root) NOPASSWD: $PFCTL -t netmon_blocked -T delete *
+    $USER ALL=(root) NOPASSWD: $PFCTL -t netmon_blocked -T show
+    $USER ALL=(root) NOPASSWD: $PFCTL -a netmon -s rules
+    $USER ALL=(root) NOPASSWD: $PFCTL -s tables
+    $USER ALL=(root) NOPASSWD: $TCPDUMP -l -n udp port 53
+    EOF
+    sudo visudo -c -f "$TMP" && sudo cp "$TMP" /etc/sudoers.d/netmon && sudo chmod 440 /etc/sudoers.d/netmon
+    rm "$TMP"
+    ```
+
+    Then load the DNS monitor agent:
+    ```bash
+    launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.user.netmon.dns.plist
+    ```
 
 === "Panel not responding"
 

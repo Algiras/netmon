@@ -3,6 +3,9 @@
 **Anomaly**
 :   A network connection from a process to a remote IP:port that is not in the baseline. Every new connection starts as an anomaly until the LLM or the user classifies it.
 
+**DNS exfiltration**
+:   A technique for leaking data by encoding it in DNS query names (e.g. `dGhpcw.attacker.com`) sent to an attacker-controlled nameserver. Because DNS uses UDP and goes through the OS resolver rather than the process's TCP socket, it bypasses TCP-level monitoring. `dns_monitor.py` detects it via Shannon entropy, label length, TXT floods, and subdomain floods.
+
 **Autonomous mode**
 :   An operating mode where the LLM resolves events without human review. The LLM calls `auto_resolve` directly instead of `send_notification`. See [Review vs Autonomous](user-guide/modes.md).
 
@@ -11,6 +14,9 @@
 
 **CIDR**
 :   Classless Inter-Domain Routing notation for IP address ranges. `34.0.0.0/8` means all IPs from `34.0.0.0` to `34.255.255.255`. Used in process policy to declare expected IP ranges.
+
+**Baseline tamper detection**
+:   A security check that computes the SHA256 checksum of `baseline.txt` and stores it in `baseline.sha256` (mode 0600). `monitor.sh` verifies the checksum on every run; a mismatch triggers a macOS alert. `verify.sh` also checks it.
 
 **Cosine similarity**
 :   A measure of how similar two vectors are, regardless of their magnitude. netmon uses cosine similarity to compare the embedding of a new event against stored past events. Threshold is **0.88** — events above this score reuse the past decision without a new LLM call.
@@ -25,7 +31,7 @@
 :   A pre-triage filter that scans the assembled context for prompt injection patterns before the LLM sees it. Prevents hostile content in connection metadata from hijacking the triage AI.
 
 **LaunchAgent**
-:   A macOS background service defined by a `.plist` file in `~/Library/LaunchAgents/`. netmon installs five LaunchAgents: monitor, analyze, heartbeat, panel, and menubar.
+:   A macOS background service defined by a `.plist` file in `~/Library/LaunchAgents/`. netmon installs seven LaunchAgents: monitor, analyze, heartbeat, dns, panel, menubar, and watchdog.
 
 **LLM (Large Language Model)**
 :   The AI model that classifies network events. netmon uses Ollama to run the LLM locally. The LLM is given three tools (`send_notification`, `auto_resolve`, `mark_as_normal`) and chooses which to call based on the event context.

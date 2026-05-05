@@ -93,3 +93,23 @@ A typical healthy baseline contains 200–500 entries after the first day of use
 ### Network Enforcement
 
 Shows whether the pf firewall anchor is configured. If not set up, a setup button appears. See [IP Blocking & pf](../security/ip-blocking.md) for details.
+
+---
+
+## Authentication
+
+Every HTTP request to the panel — from the Swift app, curl, or the MCP server — must include:
+
+```
+X-Netmon-Token: <token>
+```
+
+The token is generated on first panel boot, stored at `~/.netmon/panel_token` (mode 0600), and never transmitted over the network. Requests without a valid token receive `401 Unauthorized`. Wrong-host requests receive `403 Forbidden`.
+
+```bash
+TOKEN=$(cat ~/.netmon/panel_token)
+curl -H "Host: localhost:6543" -H "X-Netmon-Token: $TOKEN" \
+     http://localhost:6543/api/events
+```
+
+Settings written through the panel are saved to `~/.netmon/config.json` (mode 0600).

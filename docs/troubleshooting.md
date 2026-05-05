@@ -6,7 +6,7 @@
 ~/.netmon/verify.sh
 ```
 
-This checks all five components and reports pass/fail. Run this first.
+This runs 30+ automated checks across runtime, security, and services, and reports pass/fail for each. Run this first.
 
 ---
 
@@ -138,6 +138,33 @@ ollama run granite4.1:3b "hello" 2>&1 | grep -i "metal\|gpu"
 
 ---
 
+### DNS monitor not running
+
+The DNS monitor requires `/etc/sudoers.d/netmon` and `tcpdump` at `/usr/sbin/tcpdump`.
+
+```bash
+# Check if it's running
+launchctl list com.user.netmon.dns
+tail -20 ~/.netmon/dns.err
+
+# Verify sudoers
+cat /etc/sudoers.d/netmon
+
+# Verify tcpdump can run without password
+sudo /usr/sbin/tcpdump -l -n udp port 53 &
+sleep 2 && kill %1
+```
+
+If sudoers is missing, run `bash ~/.netmon/install.sh` or create it manually — see [DNS Exfiltration Detection](security/dns-exfil.md#sudoers-requirement).
+
+Restart the DNS monitor:
+```bash
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.user.netmon.dns.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.user.netmon.dns.plist
+```
+
+---
+
 ### pf enforcement not blocking IPs
 
 ```bash
@@ -186,11 +213,14 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.user.netmon.menuba
 |------|---------|
 | `~/.netmon/anomalies.log` | Raw lsof detections (monitor.sh output) |
 | `~/.netmon/analysis.log` | LLM decisions, summaries, triage results |
+| `~/.netmon/dns.log` | dns_monitor.py stdout |
+| `~/.netmon/dns.err` | dns_monitor.py errors (tcpdump failures here) |
 | `~/.netmon/panel.log` | HTTP access log for panel.py |
 | `~/.netmon/panel.err` | panel.py errors |
 | `~/.netmon/analyze.err` | analyze.py errors |
 | `~/.netmon/monitor.err` | monitor.sh errors |
 | `~/.netmon/menubar.err` | Swift app crash log |
+| `~/.netmon/watchdog.log` | Watchdog alerts when services stop |
 
 ---
 

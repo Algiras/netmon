@@ -9,7 +9,8 @@ timeline
         T+0m : install.sh finishes
              : ⚡ appears in menu bar
              : panel.py starts (localhost:6543)
-             : panel_token generated
+             : panel_token generated (mode 0600)
+             : dns_monitor.py starts capturing UDP :53
     section First detection cycle
         T+0m : monitor.sh fires immediately
              : lsof captures all active connections
@@ -23,8 +24,10 @@ timeline
     section Baseline stabilises
         T+30m : most routine connections baselined
               : alert volume drops significantly
+              : DNS monitor flags any suspicious queries
     section Normal operation
-        T+60m : only new/unexpected connections trigger alerts
+        T+60m : only new/unexpected TCP connections trigger alerts
+              : DNS tunnelling detected continuously in background
 ```
 
 !!! note "Baseline starts empty — not pre-seeded"

@@ -8,28 +8,34 @@ graph TB
         MON["monitor.sh\n⏱ every 60 s"]
         ANA["analyze.py\n⏱ every 5 min"]
         HB["analyze.py --recheck\n⏱ every 60 s"]
+        DNS["dns_monitor.py\n↻ persistent"]
         PAN["panel.py\n↻ persistent"]
         MB["NetmonMenuBar.app\n↻ persistent"]
+        WD["watchdog.sh\n⏱ every 5 min"]
     end
 
     subgraph Storage ["~/.netmon/ — flat files + SQLite"]
         LOG["anomalies.log"]
         DB[("netmon.db\nSQLite")]
         BASE["baseline.txt"]
+        BSHA["baseline.sha256\nmode 0600"]
         BLOCKED["blocked_ips.txt"]
         POLICY["process_policy.json"]
-        CFG["config.json"]
+        CFG["config.json\nmode 0600"]
         TOK["panel_token\nmode 0600"]
     end
 
     subgraph External ["External services"]
         OLL["Ollama\nlocalhost:11434"]
         PF["pf firewall\nkernel"]
+        TCPDUMP["tcpdump\nUDP :53"]
     end
 
     LSOF["lsof -i 4"] -->|snapshot| MON
     MON -->|diff vs baseline| LOG
     LOG -->|unprocessed lines| ANA
+    TCPDUMP -->|DNS packets| DNS
+    DNS -->|suspicious query → DB event| DB
     ANA <-->|embed + cosine search| DB
     ANA -->|triage result| DB
     ANA <-->|LLM + embeddings| OLL
@@ -38,10 +44,12 @@ graph TB
     ANA -->|read| POLICY
     ANA -->|read| CFG
     ANA -->|append| BASE
+    ANA -.->|update| BSHA
     DB -->|pending events| HB
     HB <-->|re-embed + re-triage| OLL
     PAN <-->|read/write| DB
     PAN <-->|read/write| BASE
+    PAN -.->|update| BSHA
     PAN <-->|read/write| BLOCKED
     PAN <-->|read/write| CFG
     PAN --- TOK
@@ -59,6 +67,8 @@ sequenceDiagram
     participant monitor.sh
     participant volume_check.py
     participant anomalies.log
+    participant tcpdump
+    participant dns_monitor.py
     participant analyze.py
     participant Ollama
     participant netmon.db
@@ -73,8 +83,15 @@ sequenceDiagram
         volume_check.py-->>anomalies.log: [VOLUME_ANOMALY] on spike
     end
 
+    loop Continuous (dns_monitor daemon)
+        tcpdump->>dns_monitor.py: UDP :53 query packet
+        dns_monitor.py->>dns_monitor.py: entropy · length · TXT flood · subdomain flood
+        dns_monitor.py-->>netmon.db: [DNS] event (severity=high) if suspicious
+    end
+
     loop Every 5 minutes
         analyze.py->>anomalies.log: read unprocessed lines
+        analyze.py->>netmon.db: read pending DNS events
         analyze.py->>analyze.py: injection guard (regex)
         analyze.py->>analyze.py: process policy check
         analyze.py->>Ollama: embed event text
@@ -99,11 +116,14 @@ sequenceDiagram
 
 ## Decision pipeline
 
-Every event from `anomalies.log` passes through six layers in strict order. Earlier layers are cheaper and can skip the rest.
+Every event — whether from `anomalies.log` (TCP) or a DNS query captured by `dns_monitor.py` — passes through seven layers in strict order. Earlier layers are cheaper and can skip the rest.
 
 ```mermaid
 flowchart TD
-    IN([New anomaly line]) --> IG
+    TCP(["🖥️ TCP anomaly\nfrom anomalies.log"])
+    DNSEV(["📡 DNS event\nfrom dns_monitor.py"])
+    TCP --> IG
+    DNSEV -->|"pre-flagged\nseverity=high"| IG
 
     IG{1 · Injection Guard\nregex scan}
     IG -->|match| BLK1[🚫 BLOCKED\nCritical · no LLM\nPending queue]
@@ -139,6 +159,7 @@ flowchart TD
 - **Token auth** — all panel routes require `X-Netmon-Token` (timing-safe `secrets.compare_digest`)
 - **No cloud by default** — all inference local via Ollama; cloud backend is explicit opt-in
 - **AI agent protection** — process policy + injection guard target exfiltration and prompt injection specifically
+- **DNS monitoring** — `dns_monitor.py` captures UDP :53 via tcpdump; detects tunnelling and high-entropy exfil before TCP-level monitoring sees it
 - **Kernel enforcement** — optional pf anchor blocks rejected IPs at the network layer
 
 ## Alert severity matrix
@@ -149,3 +170,4 @@ flowchart TD
 | `[POLICY_VIOLATION]` | Critical | Direct DB insert + notify | No |
 | `[VOLUME_ANOMALY]` | Warning+ | LLM triage | Yes |
 | `[ANOMALY]` | Info–Critical | LLM triage | Yes |
+| `[DNS]` | High | DNS heuristics → DB event → LLM triage | Yes |
