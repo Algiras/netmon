@@ -252,13 +252,18 @@ def send_notification(process, remote, title, message, severity) -> str:
 def auto_resolve(process, remote, decision, reason) -> str:
     vector   = emb.embed_event(process, remote, reason)
     severity = "info" if decision == "confirmed" else "warning"
-    event_id = db.insert_event(
-        process=process, remote=remote,
-        severity=severity,
-        summary=f"[AUTO-{decision.upper()}] {reason}",
-        embedding=vector,
-    )
-    db.update_status(event_id, decision)
+    summary  = f"[AUTO-{decision.upper()}] {reason}"
+
+    existing = db.find_pending_event(process, remote)
+    if existing:
+        db.update_event(existing, decision, severity, summary, vector)
+    else:
+        event_id = db.insert_event(
+            process=process, remote=remote,
+            severity=severity, summary=summary, embedding=vector,
+        )
+        db.update_status(event_id, decision)
+
     if decision == "confirmed":
         mark_as_normal(process, remote, reason)
     _log(f"[AUTO/{decision.upper()}] {process} → {remote}: {reason}")

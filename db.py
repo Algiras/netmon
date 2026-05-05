@@ -67,6 +67,34 @@ def update_status(event_id: int, status: str):
         c.execute("UPDATE events SET status=? WHERE id=?", (status, event_id))
 
 
+def find_pending_event(process: str, remote: str) -> int | None:
+    """Return the id of an existing pending event for this process+remote, or None."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id FROM events WHERE process=? AND remote=? AND status='pending' "
+            "ORDER BY ts DESC LIMIT 1",
+            (process, remote),
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def update_event(event_id: int, status: str, severity: str, summary: str,
+                 embedding: list[float] | None = None):
+    """Update an existing event's status, severity, summary, and optionally embedding."""
+    emb_json = json.dumps(embedding) if embedding else ""
+    with _conn() as c:
+        if embedding:
+            c.execute(
+                "UPDATE events SET status=?,severity=?,summary=?,embedding=? WHERE id=?",
+                (status, severity, summary, emb_json, event_id),
+            )
+        else:
+            c.execute(
+                "UPDATE events SET status=?,severity=?,summary=? WHERE id=?",
+                (status, severity, summary, event_id),
+            )
+
+
 def get_pending() -> list[dict]:
     with _conn() as c:
         rows = c.execute(
