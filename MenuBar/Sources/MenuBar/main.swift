@@ -23,6 +23,7 @@ struct NetmonConfig: Decodable {
     let autonomous_mode: Bool
     let llm_model:   String?
     let embed_model: String?
+    let backend:     String?
 }
 
 struct ApiResponse: Decodable {

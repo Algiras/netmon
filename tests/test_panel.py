@@ -285,6 +285,136 @@ class TestGetEndpoints(unittest.TestCase):
         resp = _get(h, "/unknown/path")
         self.assertEqual(resp[0][0], 404)
 
+    def test_api_blocked_ips_returns_list(self):
+        # panel uses Path.home() / ".netmon" / "blocked_ips.txt"
+        netmon_dir = self._dir / ".netmon"
+        netmon_dir.mkdir(exist_ok=True)
+        blocked_file = netmon_dir / "blocked_ips.txt"
+        blocked_file.write_text("1.2.3.4\n5.6.7.8\n")
+
+        import unittest.mock as mock_mod
+        home_patch = mock_mod.patch("pathlib.Path.home", return_value=self._dir)
+        home_patch.start()
+        try:
+            h = self._handler()
+            resp = _get(h, "/api/blocked-ips")
+            self.assertEqual(resp[0][0], 200)
+            data = json.loads(resp[0][1])
+            self.assertIn("ips", data)
+            self.assertIn("1.2.3.4", data["ips"])
+            self.assertIn("5.6.7.8", data["ips"])
+        finally:
+            home_patch.stop()
+
+
+class TestMalformedRequestHandling(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dir = Path(self._tmp.name)
+        cfg_file  = self._dir / "config.json"
+        cfg_file.write_text('{"autonomous_mode":false}')
+        patch.object(panel, "CONFIG_FILE", cfg_file).start()
+        patch.object(db,    "DB_PATH", self._dir / "test.db").start()
+        db.init()
+
+    def tearDown(self):
+        patch.stopall()
+        self._tmp.cleanup()
+
+    def _handler(self):
+        return _make_handler(self._dir)
+
+    def _post_raw(self, path: str, raw_bytes: bytes):
+        h = self._handler()
+        h.path    = path
+        h.headers = {**_LOCAL_HOST, "Content-Length": str(len(raw_bytes))}
+        h.rfile   = io.BytesIO(raw_bytes)
+        responses = []
+        h._respond = lambda code, body, ct="application/json": responses.append((code, body))
+        h.do_POST()
+        return responses
+
+    def test_malformed_json_config_returns_400(self):
+        resp = self._post_raw("/config", b"not valid json{")
+        self.assertEqual(resp[0][0], 400)
+        data = json.loads(resp[0][1])
+        self.assertIn("error", data)
+
+    def test_malformed_json_action_returns_400(self):
+        resp = self._post_raw("/action", b"{bad json")
+        self.assertEqual(resp[0][0], 400)
+
+    def test_invalid_event_id_string_returns_400(self):
+        resp = _post(self._handler(), "/action", {"id": "not-a-number", "action": "confirmed"})
+        self.assertEqual(resp[0][0], 400)
+
+    def test_invalid_event_id_negative_returns_400(self):
+        resp = _post(self._handler(), "/action", {"id": -1, "action": "confirmed"})
+        self.assertEqual(resp[0][0], 400)
+
+    def test_invalid_event_id_zero_returns_400(self):
+        resp = _post(self._handler(), "/action", {"id": 0, "action": "confirmed"})
+        self.assertEqual(resp[0][0], 400)
+
+    def test_invalid_action_returns_400(self):
+        resp = _post(self._handler(), "/action", {"id": 1, "action": "delete_everything"})
+        self.assertEqual(resp[0][0], 400)
+
+
+class TestUnblockIpEndpoint(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dir = Path(self._tmp.name)
+        cfg_file  = self._dir / "config.json"
+        cfg_file.write_text('{"autonomous_mode":false}')
+        patch.object(panel, "CONFIG_FILE", cfg_file).start()
+        patch.object(db,    "DB_PATH", self._dir / "test.db").start()
+        db.init()
+
+    def tearDown(self):
+        patch.stopall()
+        self._tmp.cleanup()
+
+    def _handler(self):
+        return _make_handler(self._dir)
+
+    def _netmon_blocked_file(self):
+        """Create .netmon dir under temp home and return path to blocked_ips.txt."""
+        netmon_dir = self._dir / ".netmon"
+        netmon_dir.mkdir(exist_ok=True)
+        return netmon_dir / "blocked_ips.txt"
+
+    def test_unblock_removes_ip(self):
+        blocked_file = self._netmon_blocked_file()
+        blocked_file.write_text("1.2.3.4\n5.5.5.5\n")
+        import unittest.mock as mock_mod
+        home_patch = mock_mod.patch("pathlib.Path.home", return_value=self._dir)
+        home_patch.start()
+        try:
+            resp = _post(self._handler(), "/unblock-ip", {"ip": "1.2.3.4"})
+            self.assertEqual(resp[0][0], 200)
+            remaining = blocked_file.read_text()
+            self.assertNotIn("1.2.3.4", remaining)
+            self.assertIn("5.5.5.5", remaining)
+        finally:
+            home_patch.stop()
+
+    def test_unblock_invalid_ip_returns_400(self):
+        resp = _post(self._handler(), "/unblock-ip", {"ip": "not-an-ip"})
+        self.assertEqual(resp[0][0], 400)
+
+    def test_unblock_strips_port(self):
+        blocked_file = self._netmon_blocked_file()
+        blocked_file.write_text("1.2.3.4\n")
+        import unittest.mock as mock_mod
+        home_patch = mock_mod.patch("pathlib.Path.home", return_value=self._dir)
+        home_patch.start()
+        try:
+            resp = _post(self._handler(), "/unblock-ip", {"ip": "1.2.3.4"})
+            self.assertEqual(resp[0][0], 200)
+        finally:
+            home_patch.stop()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

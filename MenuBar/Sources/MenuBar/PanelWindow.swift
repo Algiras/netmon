@@ -3,6 +3,23 @@ import SwiftUI
 
 // ── Data models ───────────────────────────────────────────────────────────────
 
+struct IPRepInfo {
+    let country: String
+    let isp: String
+    let org: String
+    let asn: String
+    let isHosting: Bool
+
+    var badge: String {
+        var parts: [String] = []
+        if !country.isEmpty { parts.append(country) }
+        let label = org.isEmpty ? isp : org
+        if !label.isEmpty { parts.append(label) }
+        if isHosting { parts.append("Datacenter") }
+        return parts.joined(separator: " · ")
+    }
+}
+
 struct ModelEntry: Decodable, Hashable {
     let name: String
     let size: String
@@ -15,31 +32,129 @@ struct OllamaModels: Decodable {
     let config:    NetmonConfig?
 }
 
+// ── Summary helpers ────────────────────────────────────────────────────────────
+
+/// Parse the [ACTION] prefix stored in event.summary by analyze.py.
+struct ParsedSummary {
+    let action: String   // e.g. "BLOCK_IP", "AUTO-CONFIRMED", "CONFIRM", "BLOCKED" — empty if absent
+    let text: String     // clean text after the prefix (prose explanation)
+    let policy: String   // non-empty only for BLOCKED events — the named injection rule that fired
+    var isAuto: Bool     { action.hasPrefix("AUTO") }
+}
+
+func parseSummary(_ raw: String) -> ParsedSummary {
+    guard raw.hasPrefix("["), let close = raw.firstIndex(of: "]") else {
+        return ParsedSummary(action: "", text: raw, policy: "")
+    }
+    let action = String(raw[raw.index(after: raw.startIndex)..<close]).uppercased()
+    let rest   = String(raw[raw.index(after: close)...]).trimmingCharacters(in: .whitespaces)
+
+    // For BLOCKED events extract the policy name: "policy: <name>"
+    var policy = ""
+    if action == "BLOCKED" {
+        if let pRange = rest.range(of: "policy: ") {
+            let afterPolicy = rest[pRange.upperBound...]
+            // take up to the next period, comma, or end of string
+            policy = String(afterPolicy.prefix(while: { $0 != "." && $0 != "," && !$0.isNewline }))
+                .trimmingCharacters(in: .whitespaces)
+        }
+    }
+    return ParsedSummary(action: action, text: rest, policy: policy)
+}
+
+/// Decode lsof \xNN escape sequences in process names (e.g. "Slack\x20" → "Slack").
+func decodeEscapes(_ s: String) -> String {
+    var result = s
+    while let range = result.range(of: #"\\x[0-9a-fA-F]{2}"#, options: .regularExpression) {
+        let hex = String(result[result.index(range.lowerBound, offsetBy: 2)..<range.upperBound])
+        if let code = UInt32(hex, radix: 16), let scalar = Unicode.Scalar(code) {
+            result.replaceSubrange(range, with: String(Character(scalar)))
+        } else { break }
+    }
+    return result.trimmingCharacters(in: .whitespaces)
+}
+
+// ── Action badge ───────────────────────────────────────────────────────────────
+
+/// Color-coded badge showing what the AI recommended (or auto-decided).
+struct ActionBadge: View {
+    let action: String
+    var large = false
+
+    private var info: (label: String, icon: String, color: Color) {
+        switch action {
+        case "CONFIRM":        return ("AI: Looks safe",         "checkmark.shield.fill",        .green)
+        case "REJECT":         return ("AI: Suspicious",         "exclamationmark.shield.fill",  .orange)
+        case "BLOCK_IP":       return ("AI: Block this IP",      "nosign",                       .red)
+        case "KILL_PROCESS":   return ("AI: Kill process",       "xmark.octagon.fill",           .red)
+        case "INVESTIGATE":    return ("AI: Needs investigation","magnifyingglass",               .blue)
+        case "AUTO-CONFIRMED": return ("Auto-confirmed",         "checkmark.circle.fill",        .green)
+        case "AUTO-REJECTED":  return ("Auto-rejected",          "xmark.circle.fill",            .red)
+        case "BLOCKED":        return ("Injection blocked",       "shield.slash.fill",            .gray)
+        default:
+            guard !action.isEmpty else { return ("", "", .clear) }
+            if action.hasPrefix("AUTO-") {
+                return ("Auto: \(action.dropFirst(5))", "bolt.circle.fill", .purple)
+            }
+            return (action.capitalized, "exclamationmark.circle", .secondary)
+        }
+    }
+
+    var body: some View {
+        if !info.label.isEmpty {
+            HStack(spacing: 3) {
+                Image(systemName: info.icon)
+                    .font(large ? .caption : .caption2)
+                Text(info.label)
+                    .font(large ? .caption : .caption2)
+                    .fontWeight(large ? .semibold : .medium)
+            }
+            .padding(.horizontal, large ? 8 : 6)
+            .padding(.vertical,   large ? 4 : 2)
+            .background(info.color.opacity(0.13))
+            .foregroundStyle(info.color)
+            .cornerRadius(5)
+        }
+    }
+}
+
 // ── View-model ────────────────────────────────────────────────────────────────
 
 @MainActor
 class PanelModel: ObservableObject {
-    @Published var pending:       [Event] = []
-    @Published var recent:        [Event] = []
-    @Published var autonomousMode = false
-    @Published var llmModels:     [ModelEntry] = []
-    @Published var embedModels:   [ModelEntry] = []
-    @Published var selectedLLM    = ""
-    @Published var selectedEmbed  = ""
+    @Published var pending:        [Event] = []
+    @Published var recent:         [Event] = []
+    @Published var autonomousMode  = false
+    @Published var backendName     = "ollama"
+    @Published var llmModels:      [ModelEntry] = []
+    @Published var embedModels:    [ModelEntry] = []
+    @Published var selectedLLM     = ""
+    @Published var selectedEmbed   = ""
     @Published var ollamaAvailable = true
     @Published var isResolving     = false
     @Published var resolveLog:     [String] = []
     @Published var isPulling       = false
     @Published var pullLog:        [String] = []
+    @Published var lastAnalyzed:   String = ""
+    @Published var ipRepCache:     [String: IPRepInfo] = [:]
+    @Published var blockedIPs:     [String] = []
+    @Published var isRechecking    = false
+
+    var usingClaude: Bool { backendName == "claude" }
 
     func refresh() {
         fetchEvents { [weak self] r in
             guard let self, let r else { return }
-            self.pending       = r.pending
-            self.recent        = r.recent
+            self.pending        = r.pending
+            self.recent         = r.recent
             self.autonomousMode = r.config?.autonomous_mode ?? self.autonomousMode
+            self.backendName    = r.config?.backend ?? "ollama"
             if let m = r.config?.llm_model,   !m.isEmpty { self.selectedLLM   = m }
             if let m = r.config?.embed_model, !m.isEmpty { self.selectedEmbed = m }
+            let ips = Set(r.pending.map { $0.remote.split(separator: ":").first.map(String.init) ?? $0.remote })
+            for ip in ips where self.ipRepCache[ip] == nil {
+                self.fetchIPReputation(ip)
+            }
         }
         guard let url = URL(string: "http://localhost:6543/api/models") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
@@ -49,10 +164,65 @@ class PanelModel: ObservableObject {
                 self.ollamaAvailable = m.available
                 self.llmModels       = m.llm
                 self.embedModels     = m.embed
+                if let b = m.config?.backend { self.backendName = b }
                 if self.selectedLLM.isEmpty,   let first = m.llm.first   { self.selectedLLM   = first.name }
                 if self.selectedEmbed.isEmpty, let first = m.embed.first  { self.selectedEmbed = first.name }
             }
         }.resume()
+        refreshLastAnalyzed()
+        fetchBlockedIPs()
+    }
+
+    func fetchBlockedIPs() {
+        guard let url = URL(string: "http://localhost:6543/api/blocked-ips") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let ips = obj["ips"] as? [String] else { return }
+            DispatchQueue.main.async { self.blockedIPs = ips }
+        }.resume()
+    }
+
+    func unblockIP(_ ip: String) {
+        guard let url  = URL(string: "http://localhost:6543/unblock-ip"),
+              let data = try? JSONSerialization.data(withJSONObject: ["ip": ip]) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        req.httpBody = data
+        URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.fetchBlockedIPs() }
+        }.resume()
+    }
+
+    private func fetchIPReputation(_ ip: String) {
+        guard let url = URL(string: "http://ip-api.com/json/\(ip)?fields=status,country,isp,org,as,hosting") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (obj["status"] as? String) == "success" else { return }
+            let info = IPRepInfo(
+                country:   obj["country"]  as? String ?? "",
+                isp:       obj["isp"]      as? String ?? "",
+                org:       obj["org"]      as? String ?? "",
+                asn:       obj["as"]       as? String ?? "",
+                isHosting: obj["hosting"]  as? Bool   ?? false
+            )
+            DispatchQueue.main.async { self.ipRepCache[ip] = info }
+        }.resume()
+    }
+
+    private func refreshLastAnalyzed() {
+        DispatchQueue.global().async {
+            let logPath = NSHomeDirectory() + "/.netmon/analysis.log"
+            guard let lines = try? String(contentsOfFile: logPath, encoding: .utf8).components(separatedBy: "\n"),
+                  let last  = lines.reversed().first(where: { $0.contains("[ANALYZE") || $0.contains("[AUTO") || $0.contains("[SWEEP") }) else { return }
+            let ts = String(last.dropFirst().prefix(19))
+            DispatchQueue.main.async { self.lastAnalyzed = ts }
+        }
     }
 
     func confirm(_ id: Int) {
@@ -68,8 +238,7 @@ class PanelModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
     }
     func toggleMode() {
-        // Turning autonomous ON requires Ollama — panel.py enforces this server-side too
-        if !autonomousMode && !ollamaAvailable { return }
+        if !autonomousMode && !usingClaude && !ollamaAvailable { return }
         toggleAutonomousMode()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
     }
@@ -122,7 +291,6 @@ class PanelModel: ObservableObject {
         selectedEmbed = name
     }
 
-    // Trigger analyze.py to process all pending events immediately
     func resolveAll() {
         guard !isResolving else { return }
         isResolving = true
@@ -138,7 +306,6 @@ class PanelModel: ObservableObject {
             task.standardOutput = pipe
             task.standardError  = pipe
             try? task.run()
-            // Stream output
             pipe.fileHandleForReading.readabilityHandler = { fh in
                 let s = String(data: fh.availableData, encoding: .utf8) ?? ""
                 if !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -155,6 +322,24 @@ class PanelModel: ObservableObject {
         }
     }
 
+    func recheck() {
+        guard autonomousMode, !isRechecking else { return }
+        isRechecking = true
+        guard let url = URL(string: "http://localhost:6543/recheck") else {
+            isRechecking = false; return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody   = "{}".data(using: .utf8)
+        URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                self?.isRechecking = false
+                self?.refresh()
+            }
+        }.resume()
+    }
+
     private func postConfig(_ body: [String: String]) {
         guard let url  = URL(string: "http://localhost:6543/config"),
               let data = try? JSONEncoder().encode(body) else { return }
@@ -169,50 +354,249 @@ class PanelModel: ObservableObject {
 
 struct EventRow: View {
     let event: Event
+    var ipRep:     IPRepInfo? = nil
     var onConfirm: (() -> Void)? = nil
     var onReject:  (() -> Void)? = nil
     var onRevert:  (() -> Void)? = nil
 
+    @State private var expanded = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                Text(icon(event.severity))
-                Text(event.process).fontWeight(.semibold)
-                Text("→").foregroundStyle(.secondary)
-                Text(event.remote).foregroundStyle(.secondary)
-                Spacer()
-                Text(String(event.ts.prefix(16))).font(.caption).foregroundStyle(.tertiary)
-            }
-            if !event.summary.isEmpty {
-                Text(event.summary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-            }
-            if let confirm = onConfirm, let reject = onReject {
-                HStack(spacing: 8) {
-                    Button("✓ Confirm  (allow)", action: confirm)
-                        .buttonStyle(.borderedProminent).tint(.green)
-                    Button("✗ Reject  (flag)", action: reject)
-                        .buttonStyle(.borderedProminent).tint(.red)
+        let parsed      = parseSummary(event.summary)
+        let displayName = decodeEscapes(event.process)
+
+        VStack(alignment: .leading, spacing: 6) {
+
+            // ── Header: always visible ────────────────────────────────────────
+            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } }) {
+                HStack(spacing: 6) {
+                    Text(icon(event.severity))
+                    Text(displayName).fontWeight(.semibold)
+                    Text("→").foregroundStyle(.secondary)
+                    Text(event.remote).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Text(String(event.ts.prefix(16))).font(.caption).foregroundStyle(.tertiary)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2).foregroundStyle(.tertiary)
                 }
+            }
+            .buttonStyle(.plain)
+
+            // ── Expanded detail ───────────────────────────────────────────────
+            if expanded {
+                VStack(alignment: .leading, spacing: 8) {
+
+                    // AI recommendation / Security Guard block — prominent at top
+                    if parsed.action == "BLOCKED" {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Security Guard", systemImage: "shield.slash.fill")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            // Policy name — most important piece of info
+                            if !parsed.policy.isEmpty {
+                                HStack(spacing: 4) {
+                                    Text("Rule triggered:")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                    Text(parsed.policy)
+                                        .font(.caption).fontWeight(.semibold)
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Color.gray.opacity(0.18))
+                                        .cornerRadius(4)
+                                }
+                            }
+                            Text("This event was blocked before reaching the AI because its content matched an injection guard rule. Review the raw summary below and manually confirm or reject.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !parsed.text.isEmpty {
+                                Text(parsed.text)
+                                    .font(.caption2).foregroundStyle(.tertiary).italic()
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.gray.opacity(0.08))
+                        .cornerRadius(6)
+                    } else if !parsed.action.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("AI Recommendation", systemImage: "brain")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            ActionBadge(action: parsed.action, large: true)
+                            if !parsed.text.isEmpty {
+                                Text(parsed.text)
+                                    .font(.caption)
+                                    .foregroundStyle(.primary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(8)
+                        .background(actionTint(parsed.action))
+                        .cornerRadius(6)
+                    } else if !event.summary.isEmpty {
+                        // No action prefix — show raw summary
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label("Analysis", systemImage: "text.magnifyingglass")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            Text(event.summary)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.06))
+                        .cornerRadius(6)
+                    }
+
+                    // Full IP reputation
+                    if let rep = ipRep {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label("IP Reputation", systemImage: rep.isHosting ? "server.rack" : "globe")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            Group {
+                                if !rep.country.isEmpty { detailRow("Country", rep.country) }
+                                if !rep.isp.isEmpty     { detailRow("ISP",     rep.isp)     }
+                                if !rep.org.isEmpty && rep.org != rep.isp {
+                                    detailRow("Org", rep.org)
+                                }
+                                if !rep.asn.isEmpty     { detailRow("ASN",     rep.asn)     }
+                                detailRow("Datacenter", rep.isHosting ? "Yes" : "No",
+                                          color: rep.isHosting ? .orange : .secondary)
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.06))
+                        .cornerRadius(6)
+                    }
+
+                    // Event metadata
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label("Details", systemImage: "info.circle")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                        detailRow("Event ID", "#\(event.id)")
+                        detailRow("Severity", event.severity.capitalized,
+                                  color: severityColor(event.severity))
+                        detailRow("Time", event.ts)
+                        detailRow("Status", event.status.capitalized,
+                                  color: statusColor(event.status))
+                    }
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.06))
+                    .cornerRadius(6)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+
             } else {
-                HStack(spacing: 8) {
-                    Text(event.status.uppercased())
-                        .font(.caption2).bold()
-                        .foregroundStyle(statusColor(event.status))
-                    if let revert = onRevert {
-                        Button(action: revert) {
-                            Label("Revert", systemImage: "arrow.uturn.backward")
-                                .font(.caption2)
+                // ── Collapsed: badge row + summary snippet ────────────────────
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        if !parsed.action.isEmpty {
+                            ActionBadge(action: parsed.action)
+                        }
+                        // For blocked events show the policy name inline
+                        if parsed.action == "BLOCKED", !parsed.policy.isEmpty {
+                            Text(parsed.policy)
+                                .font(.caption2).fontWeight(.medium)
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(Color.gray.opacity(0.15))
+                                .cornerRadius(4)
+                        }
+                        if let rep = ipRep, !rep.badge.isEmpty {
+                            HStack(spacing: 3) {
+                                Image(systemName: rep.isHosting ? "server.rack" : "globe")
+                                    .font(.caption2)
+                                Text(rep.badge).font(.caption2)
+                            }
+                            .foregroundStyle(rep.isHosting ? Color.orange : Color.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(rep.isHosting ? Color.orange.opacity(0.1) : Color.secondary.opacity(0.08))
+                            .cornerRadius(4)
+                        }
+                    }
+                    // For blocked events, just show the guard reason — not the full prose
+                    let display: String = {
+                        if parsed.action == "BLOCKED" {
+                            return parsed.policy.isEmpty
+                                ? "Blocked by injection guard — expand for details"
+                                : "Blocked by injection guard (\(parsed.policy)) — expand for details"
+                        }
+                        return parsed.text.isEmpty ? event.summary : parsed.text
+                    }()
+                    if !display.isEmpty {
+                        Text(display)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+            }
+
+            // ── Actions ───────────────────────────────────────────────────────
+            if let confirm = onConfirm, let reject = onReject {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Button("✓ Confirm", action: confirm)
+                            .buttonStyle(.borderedProminent).tint(.green)
+                            .help("Adds this connection to your safe baseline — it won't alert again")
+                        Button("✗ Reject", action: reject)
+                            .buttonStyle(.borderedProminent).tint(.red)
+                            .help("Flags as suspicious — similar connections will trigger alerts")
+                        Spacer()
+                        Button(action: { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } }) {
+                            Text(expanded ? "Less" : "Full review")
+                                .font(.caption)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
                     }
+                    Text("Confirm → adds to safe baseline · Reject → flags as suspicious")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            } else {
+                // History row: show who/what decided
+                HStack(spacing: 8) {
+                    if parsed.isAuto {
+                        ActionBadge(action: parsed.action)
+                    } else {
+                        HStack(spacing: 3) {
+                            Image(systemName: event.status == "confirmed"
+                                  ? "person.fill.checkmark" : "person.fill.xmark")
+                                .font(.caption2)
+                            Text(event.status == "confirmed" ? "You confirmed" : "You rejected")
+                                .font(.caption2).fontWeight(.medium)
+                        }
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(statusColor(event.status).opacity(0.1))
+                        .foregroundStyle(statusColor(event.status))
+                        .cornerRadius(4)
+                    }
+                    Spacer()
+                    if let revert = onRevert {
+                        Button(action: revert) {
+                            Label("Undo", systemImage: "arrow.uturn.backward")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .help("Resets to pending — removes from baseline or blocklist")
+                    }
                 }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(severityTint(event.severity))
+        .cornerRadius(6)
+    }
+
+    @ViewBuilder
+    private func detailRow(_ label: String, _ value: String, color: Color = .primary) -> some View {
+        HStack(alignment: .top, spacing: 4) {
+            Text(label + ":").font(.caption2).foregroundStyle(.tertiary)
+                .frame(width: 72, alignment: .trailing)
+            Text(value).font(.caption2).foregroundStyle(color)
+                .textSelection(.enabled)
+            Spacer()
+        }
     }
 
     private func icon(_ s: String) -> String {
@@ -224,6 +608,35 @@ struct EventRow: View {
         case "confirmed": return .green
         case "rejected":  return .red
         default:          return .secondary
+        }
+    }
+
+    private func severityColor(_ s: String) -> Color {
+        switch s {
+        case "critical": return .red
+        case "warning":  return .orange
+        default:         return .secondary
+        }
+    }
+
+    private func severityTint(_ s: String) -> Color {
+        switch s {
+        case "critical": return Color.red.opacity(0.07)
+        case "warning":  return Color.orange.opacity(0.05)
+        default:         return Color.clear
+        }
+    }
+
+    private func actionTint(_ action: String) -> Color {
+        switch action {
+        case "BLOCK_IP", "KILL_PROCESS", "REJECT", "AUTO-REJECTED":
+            return Color.red.opacity(0.06)
+        case "CONFIRM", "AUTO-CONFIRMED":
+            return Color.green.opacity(0.05)
+        case "INVESTIGATE":
+            return Color.blue.opacity(0.05)
+        default:
+            return Color.secondary.opacity(0.06)
         }
     }
 }
@@ -248,22 +661,50 @@ struct PanelView: View {
 
     // MARK: Header
     private var header: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Text("⚡ netmon").font(.headline)
             if model.pending.count > 0 {
                 Text("\(model.pending.count) pending")
                     .foregroundStyle(.orange).font(.subheadline)
             }
             Spacer()
+            if !model.lastAnalyzed.isEmpty {
+                Text("Last run \(model.lastAnalyzed)")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+            // Backend chip
+            if model.usingClaude {
+                HStack(spacing: 3) {
+                    Image(systemName: "sparkles").font(.caption2)
+                    Text("Claude").font(.caption).fontWeight(.medium)
+                }
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(Color.purple.opacity(0.12))
+                .foregroundStyle(Color.purple)
+                .cornerRadius(5)
+            }
+            // Mode chip
             Button(action: { model.toggleMode() }) {
-                Label(
-                    model.autonomousMode ? "🤖 Autonomous" : "👁 Review",
-                    systemImage: model.autonomousMode ? "brain" : "eye"
-                )
+                HStack(spacing: 4) {
+                    Image(systemName: model.autonomousMode ? "brain" : "eye")
+                        .font(.caption)
+                    Text(model.autonomousMode ? "Auto" : "Review")
+                        .font(.caption).fontWeight(.medium)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(model.autonomousMode
+                    ? Color.purple.opacity(0.15)
+                    : Color.blue.opacity(0.12))
+                .foregroundStyle(model.autonomousMode ? Color.purple : Color.blue)
+                .cornerRadius(6)
             }
+            .buttonStyle(.plain)
+            .disabled(!model.usingClaude && !model.ollamaAvailable)
             Button(action: { model.refresh() }) {
-                Image(systemName: "arrow.clockwise")
+                Image(systemName: "arrow.clockwise").font(.caption)
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .background(Color(NSColor.controlBackgroundColor))
@@ -300,41 +741,83 @@ struct PanelView: View {
                     Spacer()
                 }
             } else {
-                List(model.pending, id: \.id) { e in
-                    EventRow(event: e,
-                             onConfirm: { model.confirm(e.id) },
-                             onReject:  { model.reject(e.id) })
-                    Divider()
+                VStack(spacing: 0) {
+                    if model.autonomousMode {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.clockwise.circle.fill")
+                                .foregroundStyle(.orange)
+                            Text("\(model.pending.count) event(s) pending in autonomous mode")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button(action: { model.recheck() }) {
+                                HStack(spacing: 4) {
+                                    if model.isRechecking { ProgressView().scaleEffect(0.6) }
+                                    Text(model.isRechecking ? "Rechecking…" : "Recheck")
+                                        .font(.caption)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent).tint(.orange)
+                            .disabled(model.isRechecking)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.08))
+                        Divider()
+                    }
+                    List(model.pending, id: \.id) { e in
+                        EventRow(
+                            event:     e,
+                            ipRep:     model.ipRepCache[String(e.remote.split(separator: ":").first ?? Substring(e.remote))],
+                            onConfirm: { model.confirm(e.id) },
+                            onReject:  { model.reject(e.id) }
+                        )
+                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                    }
                 }
             }
         }
     }
 
     private var historyTab: some View {
-        List(model.recent, id: \.id) { e in
-            EventRow(
-                event:    e,
-                onRevert: e.status != "pending" ? { model.revert(e.id) } : nil
-            )
-            Divider()
+        Group {
+            if model.recent.isEmpty {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "clock.arrow.circlepath").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("No history yet").foregroundStyle(.secondary)
+                    Text("Resolved events will appear here.")
+                        .font(.caption).foregroundStyle(.tertiary)
+                    Spacer()
+                }
+            } else {
+                List(model.recent, id: \.id) { e in
+                    EventRow(
+                        event:    e,
+                        onRevert: e.status != "pending" ? { model.revert(e.id) } : nil
+                    )
+                    .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                }
+            }
         }
     }
 
     private var settingsTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // Ollama status banner
-                if !model.ollamaAvailable {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Ollama not running").fontWeight(.semibold)
-                            Text("Start Ollama to enable LLM analysis and autonomous mode.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Start") {
+            VStack(alignment: .leading, spacing: 16) {
+
+                // ── Backend banner ────────────────────────────────────────────
+                if model.usingClaude {
+                    statusBanner(
+                        icon: "sparkles", color: .purple,
+                        title: "Claude API backend active",
+                        message: "LLM analysis and autonomous mode use the Anthropic Claude API."
+                    ) { EmptyView() }
+                } else if !model.ollamaAvailable {
+                    statusBanner(
+                        icon: "exclamationmark.triangle.fill", color: .orange,
+                        title: "Ollama not running",
+                        message: "Start Ollama to enable LLM analysis and autonomous mode."
+                    ) {
+                        Button("Start Ollama") {
                             let t = Process()
                             t.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
                             t.arguments = ["serve"]
@@ -343,137 +826,193 @@ struct PanelView: View {
                         }
                         .buttonStyle(.borderedProminent).tint(.orange)
                     }
-                    .padding(10)
-                    .background(Color.orange.opacity(0.1))
-                    .cornerRadius(8)
                 } else if model.llmModels.isEmpty || model.embedModels.isEmpty {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundStyle(.blue)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Models not downloaded").fontWeight(.semibold)
-                            Text("LLM and embedding models are required for analysis.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
+                    statusBanner(
+                        icon: "arrow.down.circle.fill", color: .blue,
+                        title: "Models not downloaded",
+                        message: "LLM and embedding models are required for analysis."
+                    ) {
                         Button(action: { model.pullModels() }) {
                             HStack(spacing: 4) {
                                 if model.isPulling { ProgressView().scaleEffect(0.7) }
-                                Text(model.isPulling ? "Downloading…" : "Download")
+                                Text(model.isPulling ? "Downloading…" : "Download Models")
                             }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.isPulling)
+                        .buttonStyle(.borderedProminent).disabled(model.isPulling)
                     }
-                    .padding(10)
-                    .background(Color.blue.opacity(0.1))
-                    .cornerRadius(8)
-                    if !model.pullLog.isEmpty {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 2) {
-                                ForEach(model.pullLog, id: \.self) { line in
-                                    Text(line).font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                        }
-                        .frame(height: 80)
-                        .background(Color(NSColor.textBackgroundColor))
-                        .cornerRadius(6)
-                    }
+                    if !model.pullLog.isEmpty { logView(model.pullLog, height: 80) }
                 }
 
-                // Autonomous mode
-                GroupBox("Mode") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Autonomous mode", isOn: Binding(
-                            get: { model.autonomousMode },
-                            set: { _ in model.toggleMode() }
-                        ))
-                        .disabled(!model.ollamaAvailable)
-                        Text(
-                            !model.ollamaAvailable
-                                ? "Ollama required — manual review only."
-                                : model.autonomousMode
-                                    ? "LLM auto-resolves events without human review."
-                                    : "LLM flags events for your approval."
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-
-                        Divider()
-
-                        Button(action: { model.resolveAll() }) {
-                            HStack {
-                                if model.isResolving {
-                                    ProgressView().scaleEffect(0.7)
-                                }
-                                Text(model.isResolving ? "Analysing…" : "▶  Run analysis now (all pending)")
+                // ── Analysis ──────────────────────────────────────────────────
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 10) {
+                            Toggle("", isOn: Binding(
+                                get: { model.autonomousMode },
+                                set: { _ in model.toggleMode() }
+                            ))
+                            .labelsHidden()
+                            .disabled(!model.usingClaude && !model.ollamaAvailable)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Autonomous mode").fontWeight(.medium)
+                                Text(
+                                    (!model.usingClaude && !model.ollamaAvailable)
+                                    ? "Ollama or Claude API required."
+                                    : model.autonomousMode
+                                        ? "AI resolves all events automatically without your review."
+                                        : "AI flags events and waits for your confirm/reject."
+                                )
+                                .font(.caption).foregroundStyle(.secondary)
                             }
                         }
-                        .disabled(model.isResolving)
-
-                        if !model.resolveLog.isEmpty {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    ForEach(model.resolveLog, id: \.self) { line in
-                                        Text(line).font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(.secondary)
+                        Divider()
+                        // LLM model picker (only for Ollama backend)
+                        if !model.usingClaude {
+                            HStack {
+                                Text("Model").font(.caption).foregroundStyle(.secondary)
+                                    .frame(width: 44, alignment: .trailing)
+                                Picker("", selection: Binding(
+                                    get: { model.selectedLLM },
+                                    set: { model.setLLM($0) }
+                                )) {
+                                    ForEach(model.llmModels, id: \.name) { m in
+                                        Text("\(m.name)  (\(m.size))").tag(m.name)
+                                    }
+                                    if model.llmModels.isEmpty {
+                                        Text(model.selectedLLM.isEmpty ? "Loading…" : model.selectedLLM)
+                                            .tag(model.selectedLLM)
                                     }
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(8)
+                                .pickerStyle(.menu)
                             }
-                            .frame(height: 100)
-                            .background(Color(NSColor.textBackgroundColor))
-                            .cornerRadius(6)
+                            Divider()
+                        } else {
+                            HStack(spacing: 6) {
+                                Image(systemName: "sparkles").foregroundStyle(.purple).font(.caption)
+                                Text("Model: \(model.selectedLLM.isEmpty ? "claude-opus-4-7" : model.selectedLLM)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text("(set via config.json llm_model)")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            Divider()
                         }
+                        HStack {
+                            Button(action: { model.resolveAll() }) {
+                                HStack(spacing: 6) {
+                                    if model.isResolving {
+                                        ProgressView().scaleEffect(0.7)
+                                    } else {
+                                        Image(systemName: "play.fill").font(.caption)
+                                    }
+                                    Text(model.isResolving ? "Analysing…" : "Run analysis now")
+                                }
+                            }
+                            .disabled(model.isResolving || (!model.usingClaude && !model.ollamaAvailable))
+                            Spacer()
+                        }
+                        if !model.resolveLog.isEmpty { logView(model.resolveLog, height: 100) }
                     }
                     .padding(8)
+                } label: {
+                    Label("Analysis", systemImage: "brain").font(.caption).foregroundStyle(.secondary)
                 }
 
-                // LLM model
-                GroupBox("Analysis Model") {
-                    Picker("", selection: Binding(
-                        get: { model.selectedLLM },
-                        set: { model.setLLM($0) }
-                    )) {
-                        ForEach(model.llmModels, id: \.name) { m in
-                            Text("\(m.name)  (\(m.size))").tag(m.name)
-                        }
-                        if model.llmModels.isEmpty {
-                            Text(model.selectedLLM.isEmpty ? "Loading…" : model.selectedLLM)
-                                .tag(model.selectedLLM)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .padding(4)
-                }
-
-                // Embedding model
-                GroupBox("Memory Model") {
+                // ── Memory ────────────────────────────────────────────────────
+                GroupBox {
                     VStack(alignment: .leading, spacing: 6) {
-                        Picker("", selection: Binding(
-                            get: { model.selectedEmbed },
-                            set: { model.setEmbed($0) }
-                        )) {
-                            ForEach(model.embedModels, id: \.name) { m in
-                                Text("\(m.name)  (\(m.size))").tag(m.name)
+                        HStack {
+                            Text("Model").font(.caption).foregroundStyle(.secondary)
+                                .frame(width: 44, alignment: .trailing)
+                            Picker("", selection: Binding(
+                                get: { model.selectedEmbed },
+                                set: { model.setEmbed($0) }
+                            )) {
+                                ForEach(model.embedModels, id: \.name) { m in
+                                    Text("\(m.name)  (\(m.size))").tag(m.name)
+                                }
+                                if model.embedModels.isEmpty {
+                                    Text(model.selectedEmbed.isEmpty ? "Loading…" : model.selectedEmbed)
+                                        .tag(model.selectedEmbed)
+                                }
                             }
-                            if model.embedModels.isEmpty {
-                                Text(model.selectedEmbed.isEmpty ? "Loading…" : model.selectedEmbed)
-                                    .tag(model.selectedEmbed)
+                            .pickerStyle(.menu)
+                        }
+                        Text("Embeddings always use Ollama for RAG memory — independent of the LLM backend.")
+                            .font(.caption2).foregroundStyle(.tertiary).padding(.leading, 52)
+                        Text("Changing the embedding model clears all stored RAG memory.")
+                            .font(.caption2).foregroundStyle(.tertiary).padding(.leading, 52)
+                    }
+                    .padding(8)
+                } label: {
+                    Label("Memory  (RAG embeddings)", systemImage: "memorychip").font(.caption).foregroundStyle(.secondary)
+                }
+
+                // ── Blocked IPs ───────────────────────────────────────────────
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if model.blockedIPs.isEmpty {
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark.shield.fill").foregroundStyle(.green)
+                                Text("No IPs currently blocked")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 2)
+                        } else {
+                            ForEach(model.blockedIPs, id: \.self) { ip in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "nosign").foregroundStyle(.red).font(.caption)
+                                    Text(ip).font(.system(size: 12, design: .monospaced))
+                                    Spacer()
+                                    Button("Unblock") { model.unblockIP(ip) }
+                                        .buttonStyle(.bordered).controlSize(.mini).tint(.orange)
+                                }
                             }
                         }
-                        .pickerStyle(.menu)
-                        Text("Changing the embedding model clears all stored RAG embeddings.")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text("IPs blocked by the AI's block_ip tool. Unblock to allow connections again.")
+                            .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    .padding(4)
+                    .padding(8)
+                } label: {
+                    Label("Blocked IPs", systemImage: "shield.slash").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .padding(16)
         }
+    }
+
+    // MARK: Helpers
+    @ViewBuilder
+    private func statusBanner<A: View>(
+        icon: String, color: Color, title: String, message: String,
+        @ViewBuilder action: () -> A
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(color).font(.title3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).fontWeight(.semibold)
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            action()
+        }
+        .padding(10)
+        .background(color.opacity(0.08))
+        .cornerRadius(8)
+    }
+
+    private func logView(_ lines: [String], height: CGFloat) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(lines, id: \.self) { line in
+                    Text(line).font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        }
+        .frame(height: height)
+        .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(6)
     }
 }
 

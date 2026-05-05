@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
+import baseline as _baseline
 import db
 
 PORT        = 6543
@@ -37,24 +38,8 @@ RAG_CASCADE_SIM = 0.88  # similarity threshold for cascading manual decisions
 
 
 def _cascade_decision(event_id: int, decision: str) -> int:
-    """After a manual confirm/reject, auto-resolve similar pending events."""
-    vector = db.get_event_embedding(event_id)
-    if not vector:
-        return 0
-    similar_pending = db.find_similar(
-        vector, top_k=50, min_sim=RAG_CASCADE_SIM, only_status="pending"
-    )
-    count = 0
-    for s in similar_pending:
-        if s["id"] == event_id:
-            continue
-        db.update_event(
-            s["id"], decision, s["severity"],
-            f"[AUTO-{decision.upper()}] Cascaded from similar event #{event_id} "
-            f"(sim={s['similarity']})",
-        )
-        count += 1
-    return count
+    """After a manual confirm/reject, auto-resolve similar pending events in one transaction."""
+    return db.cascade_decision(event_id, decision, RAG_CASCADE_SIM)
 
 
 def _ollama_available() -> bool:
@@ -102,7 +87,8 @@ def list_ollama_models() -> dict:
 # ── HTTP handler ───────────────────────────────────────────────────────────────
 
 _ALLOWED_ACTIONS     = {"confirmed", "rejected", "revert", "pending"}
-_ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model"}
+_ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model", "abuseipdb_key",
+                        "backend", "anthropic_api_key"}
 _MODEL_RE            = re.compile(r"^[\w][\w.\-:/]{0,100}$")
 MAX_BODY             = 65_536  # 64 KB — enough for any legitimate panel request
 
@@ -140,6 +126,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/models":
             data = {**list_ollama_models(), "config": read_config()}
             self._respond(200, json.dumps(data), "application/json")
+        elif self.path == "/api/blocked-ips":
+            blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
+            ips = blocked_file.read_text().splitlines() if blocked_file.exists() else []
+            self._respond(200, json.dumps({"ips": [ip for ip in ips if ip.strip()]}), "application/json")
         else:
             self._respond(404, "not found")
 
@@ -147,15 +137,27 @@ class Handler(BaseHTTPRequestHandler):
         if not self._check_host():
             self._respond(403, '{"error":"forbidden"}', "application/json"); return
         length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY)
+        try:
+            raw_body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, ValueError):
+            self._respond(400, '{"error":"invalid JSON"}', "application/json"); return
         if self.path == "/config":
-            body   = json.loads(self.rfile.read(length))
+            body   = raw_body
             cfg    = read_config()
             clear_emb = body.pop("_clear_embeddings", False)
             if "toggle" in body:
                 key = body["toggle"]
-                # Block enabling autonomous mode when Ollama is unreachable
                 if key == "autonomous_mode" and not cfg.get("autonomous_mode", False):
-                    if not _ollama_available():
+                    backend = cfg.get("backend", "ollama")
+                    if backend == "claude":
+                        import os as _os
+                        api_key = cfg.get("anthropic_api_key", "") or _os.environ.get("ANTHROPIC_API_KEY", "")
+                        if not api_key:
+                            self._respond(409,
+                                json.dumps({"error": "No ANTHROPIC_API_KEY configured — cannot enable autonomous mode"}),
+                                "application/json")
+                            return
+                    elif not _ollama_available():
                         self._respond(409,
                             json.dumps({"error": "Ollama not available — cannot enable autonomous mode"}),
                             "application/json")
@@ -175,44 +177,45 @@ class Handler(BaseHTTPRequestHandler):
                 db.clear_embeddings()
             self._respond(200, json.dumps(cfg), "application/json")
         elif self.path == "/action":
-            body   = json.loads(self.rfile.read(length))
+            body   = raw_body
             action = body.get("action", "")
             if action not in _ALLOWED_ACTIONS:
                 self._respond(400, '{"error":"invalid action"}', "application/json"); return
 
+            try:
+                event_id = int(body["id"])
+                if event_id <= 0:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                self._respond(400, '{"error":"invalid id"}', "application/json"); return
+
             with db._conn() as c:
                 row = c.execute(
-                    "SELECT process,remote,status FROM events WHERE id=?", (body["id"],)
+                    "SELECT process,remote,status FROM events WHERE id=?", (event_id,)
                 ).fetchone()
 
             if row is None:
                 self._respond(404, '{"error":"event not found"}', "application/json"); return
 
             if action != "revert":
-                db.update_status(int(body["id"]), action)
+                db.update_status(event_id, action)
                 if action in ("confirmed", "rejected"):
-                    _cascade_decision(int(body["id"]), action)
+                    _cascade_decision(event_id, action)
 
             # If confirmed, add to baseline (sorted — comm requires sorted input)
             if action == "confirmed" and row:
-                baseline = Path.home() / ".netmon" / "baseline.txt"
-                entry    = f"{row['process']}|{row['remote']}"
-                existing = set(baseline.read_text().splitlines()) if baseline.exists() else set()
-                if entry not in existing:
-                    baseline.parent.mkdir(parents=True, exist_ok=True)
-                    baseline.write_text("\n".join(sorted(existing | {entry})) + "\n")
+                _baseline.add_entry(
+                    Path.home() / ".netmon" / "baseline.txt",
+                    f"{row['process']}|{row['remote']}",
+                )
 
             # Revert: reset to pending, undo baseline/block side-effects
             if action == "revert" and row:
-                db.update_status(int(body["id"]), "pending")
-                # Remove from baseline if it was confirmed
-                baseline = Path.home() / ".netmon" / "baseline.txt"
-                entry = f"{row['process']}|{row['remote']}"
-                if baseline.exists():
-                    lines = baseline.read_text().splitlines()
-                    new_lines = [l for l in lines if l.strip() != entry]
-                    if len(new_lines) != len(lines):
-                        baseline.write_text("\n".join(new_lines) + ("\n" if new_lines else ""))
+                db.update_status(event_id, "pending")
+                _baseline.remove_entry(
+                    Path.home() / ".netmon" / "baseline.txt",
+                    f"{row['process']}|{row['remote']}",
+                )
                 # Remove IP from blocked list if it was rejected
                 blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
                 bare_ip = row['remote'].split(":")[0]
@@ -225,6 +228,34 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._respond(200, '{"ok":true}', "application/json")
+        elif self.path == "/unblock-ip":
+            body    = raw_body
+            bare_ip = str(body.get("ip", "")).strip()
+            import ipaddress as _ipmod
+            try:
+                bare_ip = str(_ipmod.ip_address(bare_ip))
+            except ValueError:
+                self._respond(400, '{"error":"invalid ip"}', "application/json"); return
+            blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
+            if blocked_file.exists():
+                ips = blocked_file.read_text().splitlines()
+                new_ips = [ip for ip in ips if ip.strip() != bare_ip]
+                blocked_file.write_text("\n".join(new_ips) + ("\n" if new_ips else ""))
+            self._respond(200, '{"ok":true}', "application/json")
+        elif self.path == "/recheck":
+            cfg = read_config()
+            if not cfg.get("autonomous_mode", False):
+                self._respond(409,
+                    '{"error":"recheck only available in autonomous mode"}',
+                    "application/json")
+                return
+            analyze_script = Path.home() / ".netmon" / "analyze.py"
+            import subprocess as _sp
+            _sp.Popen(
+                [sys.executable, str(analyze_script), "--recheck"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            self._respond(200, '{"ok":true,"message":"recheck started"}', "application/json")
         else:
             self._respond(404, "not found")
 
