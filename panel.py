@@ -140,6 +140,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/models":
             data = {**list_ollama_models(), "config": read_config()}
             self._respond(200, json.dumps(data), "application/json")
+        elif self.path == "/api/blocked-ips":
+            blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
+            ips = blocked_file.read_text().splitlines() if blocked_file.exists() else []
+            self._respond(200, json.dumps({"ips": [ip for ip in ips if ip.strip()]}), "application/json")
         else:
             self._respond(404, "not found")
 
@@ -224,6 +228,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._respond(200, '{"ok":true}', "application/json")
                 return
 
+            self._respond(200, '{"ok":true}', "application/json")
+        elif self.path == "/unblock-ip":
+            body    = json.loads(self.rfile.read(length))
+            bare_ip = str(body.get("ip", "")).strip()
+            import ipaddress as _ipmod
+            try:
+                bare_ip = str(_ipmod.ip_address(bare_ip))
+            except ValueError:
+                self._respond(400, '{"error":"invalid ip"}', "application/json"); return
+            blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
+            if blocked_file.exists():
+                ips = blocked_file.read_text().splitlines()
+                new_ips = [ip for ip in ips if ip.strip() != bare_ip]
+                blocked_file.write_text("\n".join(new_ips) + ("\n" if new_ips else ""))
             self._respond(200, '{"ok":true}', "application/json")
         else:
             self._respond(404, "not found")

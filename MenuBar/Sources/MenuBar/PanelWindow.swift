@@ -50,6 +50,7 @@ class PanelModel: ObservableObject {
     @Published var pullLog:        [String] = []
     @Published var lastAnalyzed:   String = ""
     @Published var ipRepCache:     [String: IPRepInfo] = [:]
+    @Published var blockedIPs:     [String] = []
 
     func refresh() {
         fetchEvents { [weak self] r in
@@ -78,6 +79,32 @@ class PanelModel: ObservableObject {
             }
         }.resume()
         refreshLastAnalyzed()
+        fetchBlockedIPs()
+    }
+
+    func fetchBlockedIPs() {
+        guard let url = URL(string: "http://localhost:6543/api/blocked-ips") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let ips = obj["ips"] as? [String] else { return }
+            DispatchQueue.main.async { self.blockedIPs = ips }
+        }.resume()
+    }
+
+    func unblockIP(_ ip: String) {
+        guard let url  = URL(string: "http://localhost:6543/unblock-ip"),
+              let data = try? JSONSerialization.data(withJSONObject: ["ip": ip]) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        req.httpBody = data
+        URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.fetchBlockedIPs() }
+        }.resume()
     }
 
     private func fetchIPReputation(_ ip: String) {
@@ -546,6 +573,38 @@ struct PanelView: View {
                     }
                     .pickerStyle(.menu)
                     .padding(4)
+                }
+
+                // Blocked IPs
+                GroupBox("Blocked IPs") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if model.blockedIPs.isEmpty {
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark.shield")
+                                    .foregroundStyle(.green)
+                                Text("No IPs blocked").foregroundStyle(.secondary)
+                                    .font(.caption)
+                            }
+                            .padding(4)
+                        } else {
+                            ForEach(model.blockedIPs, id: \.self) { ip in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "slash.circle.fill")
+                                        .foregroundStyle(.red).font(.caption)
+                                    Text(ip)
+                                        .font(.system(size: 12, design: .monospaced))
+                                    Spacer()
+                                    Button("Unblock") { model.unblockIP(ip) }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.mini)
+                                        .tint(.orange)
+                                }
+                            }
+                        }
+                        Text("IPs blocked by the LLM via the block_ip tool or manually rejected events.")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    .padding(8)
                 }
 
                 // Embedding model

@@ -592,6 +592,8 @@ _INJECTION_PATTERNS = re.compile(
 
 def sanitize_field(text: str, max_len: int = 200) -> str:
     """Strip control characters and cap length to prevent context pollution."""
+    # lsof sometimes emits \xNN escapes for non-ASCII chars in process names — decode them
+    text = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), text)
     # Remove null bytes, carriage returns, and other non-printable control chars
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
     # Collapse newlines/tabs to spaces so field content stays single-line
