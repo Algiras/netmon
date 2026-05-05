@@ -1055,7 +1055,8 @@ def _log(msg: str):
 def load_new_anomalies() -> list[str]:
     if not ANOMALY_LOG.exists():
         return []
-    all_lines = [l for l in ANOMALY_LOG.read_text().splitlines() if "[ANOMALY]" in l]
+    all_lines = [l for l in ANOMALY_LOG.read_text().splitlines()
+                 if "[ANOMALY]" in l or "[VOLUME_ANOMALY]" in l]
 
     cursor = 0
     last_line = ""
@@ -1107,14 +1108,24 @@ def build_context(lines: list[str]) -> tuple[str, list[dict]]:
     for line in lines:
         try:
             ts_str  = line[1:20]
-            rest    = line.split("] [ANOMALY] ", 1)[-1]
-            proc, remote = rest.split(" -> ", 1)
+            is_vol  = "[VOLUME_ANOMALY]" in line
+            tag     = "[VOLUME_ANOMALY]" if is_vol else "[ANOMALY]"
+            rest    = line.split(f"] {tag} ", 1)[-1]
+            proc, remote_full = rest.split(" -> ", 1)
+            # VOLUME_ANOMALY lines have trailing "(N conns, avg M)" — strip before DB/embed
+            remote  = remote_full.split(" (")[0].strip() if is_vol else remote_full.strip()
             # Sanitize untrusted fields before they enter LLM context
             proc   = sanitize_field(proc.strip(),   max_len=64)
-            remote = sanitize_field(remote.strip(),  max_len=64)
+            remote = sanitize_field(remote,          max_len=64)
             ts      = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
             bucket  = ts.strftime("%Y-%m-%d %H:%M")[:-1] + "0"
-            buckets[bucket].append(f"  {proc} → {remote}")
+            display = f"  {proc} → {remote}"
+            if is_vol:
+                # Include spike details in timeline so the LLM gets the context
+                extra = remote_full.split(" (", 1)[1].rstrip(")") if " (" in remote_full else ""
+                if extra:
+                    display += f"  [VOLUME SPIKE: {extra}]"
+            buckets[bucket].append(display)
             process_counts[proc] += 1
             parsed.append({"ts": ts_str, "process": proc, "remote": remote})
 
@@ -1350,8 +1361,9 @@ def main():
     groups: dict[str, list[str]] = defaultdict(list)
     for line in new_lines:
         try:
-            raw_proc = line.split("] [ANOMALY] ", 1)[-1].split(" -> ")[0]
-            proc = sanitize_field(raw_proc, max_len=64).strip()
+            tag      = "[VOLUME_ANOMALY]" if "[VOLUME_ANOMALY]" in line else "[ANOMALY]"
+            raw_proc = line.split(f"] {tag} ", 1)[-1].split(" -> ")[0]
+            proc     = sanitize_field(raw_proc, max_len=64).strip()
             groups[proc].append(line)
         except Exception:
             continue

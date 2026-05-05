@@ -54,6 +54,9 @@ if [ -n "$ANOMALIES" ]; then
   fi
 fi
 
+# Volume spike check (runs after baseline comparison so the counts file is always fresh)
+python3 "$NETMON_DIR/volume_check.py" 2>/dev/null
+
 # Rotate log to avoid unbounded growth
 if [ -f "$LOG" ]; then
   LINE_COUNT=$(wc -l < "$LOG" | tr -d ' ')
