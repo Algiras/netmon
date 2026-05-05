@@ -31,7 +31,8 @@ echo "$_pt" | grep -q "passed" \
     || fail "unit tests failed — run: python3 -m pytest $NETMON/tests/ -v"
 
 # 5. Panel server responding
-if curl -sf --max-time 3 http://localhost:6543/api/config > /dev/null 2>&1; then
+_TOKEN="$(cat "$HOME/.netmon/panel_token" 2>/dev/null || echo '')"
+if curl -sf --max-time 3 -H "Host: localhost:6543" -H "X-Netmon-Token: $_TOKEN" http://localhost:6543/api/config > /dev/null 2>&1; then
     ok "panel server up (localhost:6543)"
 else
     fail "panel server not responding — check: launchctl list com.user.netmon.panel"

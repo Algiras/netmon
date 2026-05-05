@@ -9,6 +9,7 @@ baseline.txt
 blocked_ips.txt
 blocked_ips_meta.json
 config.json
+panel_token
 .analyze_cursor
 .analyze.lock
 .current.tmp

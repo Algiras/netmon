@@ -16,14 +16,22 @@ from mcp.server.fastmcp import FastMCP
 
 PANEL = "http://localhost:6543"
 NETMON = Path.home() / ".netmon"
+_PANEL_TOKEN_FILE = Path.home() / ".netmon" / "panel_token"
 
 mcp = FastMCP("netmon")
+
+
+def _panel_token() -> str:
+    try:
+        return _PANEL_TOKEN_FILE.read_text().strip()
+    except Exception:
+        return ""
 
 
 def _panel_get(path: str) -> dict:
     req = urllib.request.Request(
         f"{PANEL}{path}",
-        headers={"Host": "localhost:6543"},
+        headers={"Host": "localhost:6543", "X-Netmon-Token": _panel_token()},
     )
     with urllib.request.urlopen(req, timeout=5) as r:
         return json.loads(r.read())
@@ -36,6 +44,7 @@ def _panel_post(path: str, payload: dict) -> dict:
         data=data,
         headers={
             "Host": "localhost:6543",
+            "X-Netmon-Token": _panel_token(),
             "Content-Type": "application/json",
             "Content-Length": str(len(data)),
         },

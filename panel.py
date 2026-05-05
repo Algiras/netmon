@@ -8,6 +8,7 @@ Reads/writes ~/.netmon/netmon.db via db.py.
 import json
 import os
 import re
+import secrets
 import sys
 import threading
 import urllib.request
@@ -19,8 +20,26 @@ sys.path.insert(0, str(Path(__file__).parent))
 import baseline as _baseline
 import db
 
-PORT        = 6543
-CONFIG_FILE = Path.home() / ".netmon" / "config.json"
+PORT             = 6543
+CONFIG_FILE      = Path.home() / ".netmon" / "config.json"
+PANEL_TOKEN_FILE = Path.home() / ".netmon" / "panel_token"
+
+
+def _load_or_create_token() -> str:
+    if PANEL_TOKEN_FILE.exists():
+        try:
+            tok = PANEL_TOKEN_FILE.read_text().strip()
+            if tok:
+                return tok
+        except Exception:
+            pass
+    tok = secrets.token_hex(32)
+    PANEL_TOKEN_FILE.write_text(tok)
+    os.chmod(PANEL_TOKEN_FILE, 0o600)
+    return tok
+
+
+PANEL_TOKEN = _load_or_create_token()
 
 
 def read_config() -> dict:
@@ -172,13 +191,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def _check_host(self) -> bool:
+    def _check_auth(self) -> bool:
         host = self.headers.get("Host", "")
-        return host in ("localhost:6543", "127.0.0.1:6543")
+        if host not in ("localhost:6543", "127.0.0.1:6543"):
+            return False
+        tok = self.headers.get("X-Netmon-Token", "")
+        return secrets.compare_digest(tok, PANEL_TOKEN)
 
     def do_GET(self):
-        if not self._check_host():
-            self._respond(403, '{"error":"forbidden"}', "application/json"); return
+        if not self._check_auth():
+            self._respond(401, '{"error":"unauthorized"}', "application/json"); return
         if self.path == "/api/events":
             db.init()
             cfg  = read_config()
@@ -241,8 +263,8 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(404, "not found")
 
     def do_POST(self):
-        if not self._check_host():
-            self._respond(403, '{"error":"forbidden"}', "application/json"); return
+        if not self._check_auth():
+            self._respond(401, '{"error":"unauthorized"}', "application/json"); return
         length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY)
         try:
             raw_body = json.loads(self.rfile.read(length))

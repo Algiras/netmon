@@ -9,6 +9,12 @@ import UserNotifications
 
 // ── Panel API client ──────────────────────────────────────────────────────────
 
+let panelToken: String = {
+    let p = ("~/.netmon/panel_token" as NSString).expandingTildeInPath
+    return (try? String(contentsOfFile: p, encoding: .utf8))?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+}()
+
 struct Event: Decodable {
     let id: Int
     let ts: String
@@ -36,7 +42,10 @@ func fetchEvents(completion: @escaping (ApiResponse?) -> Void) {
     guard let url = URL(string: "http://localhost:6543/api/events") else {
         completion(nil); return
     }
-    URLSession.shared.dataTask(with: url) { data, _, _ in
+    var req = URLRequest(url: url)
+    req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+    req.setValue(panelToken, forHTTPHeaderField: "X-Netmon-Token")
+    URLSession.shared.dataTask(with: req) { data, _, _ in
         guard let data, let r = try? JSONDecoder().decode(ApiResponse.self, from: data) else {
             completion(nil); return
         }
@@ -50,6 +59,7 @@ func postAction(id: Int, action: String, blockIPAlso: Bool = false) {
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+    req.setValue(panelToken, forHTTPHeaderField: "X-Netmon-Token")
     var body = "{\"id\":\(id),\"action\":\"\(action)\""
     if blockIPAlso { body += ",\"block_ip_also\":true" }
     body += "}"
@@ -64,6 +74,8 @@ func toggleAutonomousMode() {
     var req = URLRequest(url: url)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+    req.setValue(panelToken, forHTTPHeaderField: "X-Netmon-Token")
     req.httpBody = "{\"toggle\":\"autonomous_mode\"}".data(using: .utf8)
     URLSession.shared.dataTask(with: req).resume()
 }

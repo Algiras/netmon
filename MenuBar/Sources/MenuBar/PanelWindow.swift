@@ -183,7 +183,10 @@ class PanelModel: ObservableObject {
             }
         }
         guard let url = URL(string: "http://localhost:6543/api/models") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        var modelsReq = URLRequest(url: url)
+        modelsReq.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        modelsReq.setValue(panelToken, forHTTPHeaderField: "X-Netmon-Token")
+        URLSession.shared.dataTask(with: modelsReq) { [weak self] data, _, _ in
             guard let self, let data,
                   let m = try? JSONDecoder().decode(OllamaModels.self, from: data) else { return }
             DispatchQueue.main.async {
@@ -202,6 +205,7 @@ class PanelModel: ObservableObject {
         guard let url = URL(string: "http://localhost:6543/api/blocked-ips") else { return }
         var req = URLRequest(url: url)
         req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        req.setValue(panelToken, forHTTPHeaderField: "X-Netmon-Token")
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -224,6 +228,7 @@ class PanelModel: ObservableObject {
         guard let url = URL(string: "http://localhost:6543/api/baseline") else { return }
         var req = URLRequest(url: url)
         req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        req.setValue(panelToken, forHTTPHeaderField: "X-Netmon-Token")
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -247,6 +252,7 @@ class PanelModel: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("localhost:6543",   forHTTPHeaderField: "Host")
+        req.setValue(panelToken,         forHTTPHeaderField: "X-Netmon-Token")
         req.httpBody = data
         URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.fetchBaseline() }
@@ -257,6 +263,7 @@ class PanelModel: ObservableObject {
         guard let url = URL(string: "http://localhost:6543/api/pf-status") else { return }
         var req = URLRequest(url: url)
         req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        req.setValue(panelToken, forHTTPHeaderField: "X-Netmon-Token")
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
@@ -275,6 +282,7 @@ class PanelModel: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("localhost:6543",   forHTTPHeaderField: "Host")
+        req.setValue(panelToken,         forHTTPHeaderField: "X-Netmon-Token")
         req.httpBody = data
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             guard let self else { return }
@@ -295,6 +303,7 @@ class PanelModel: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        req.setValue(panelToken,       forHTTPHeaderField: "X-Netmon-Token")
         req.httpBody = data
         URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.fetchBlockedIPs() }
@@ -437,7 +446,9 @@ class PanelModel: ObservableObject {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json",   forHTTPHeaderField: "Content-Type")
+        req.setValue("localhost:6543",     forHTTPHeaderField: "Host")
+        req.setValue(panelToken,           forHTTPHeaderField: "X-Netmon-Token")
         req.httpBody   = "{}".data(using: .utf8)
         URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
@@ -451,7 +462,10 @@ class PanelModel: ObservableObject {
         guard let url  = URL(string: "http://localhost:6543/config"),
               let data = try? JSONEncoder().encode(body) else { return }
         var req = URLRequest(url: url)
-        req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("localhost:6543",   forHTTPHeaderField: "Host")
+        req.setValue(panelToken,         forHTTPHeaderField: "X-Netmon-Token")
         req.httpBody   = data
         URLSession.shared.dataTask(with: req).resume()
     }
@@ -1015,9 +1029,9 @@ struct PanelView: View {
                 // ── Backend banner ────────────────────────────────────────────
                 if model.usingClaude {
                     statusBanner(
-                        icon: "sparkles", color: .purple,
-                        title: "Claude API backend active",
-                        message: "LLM analysis and autonomous mode use the Anthropic Claude API."
+                        icon: "exclamationmark.shield.fill", color: .orange,
+                        title: "Claude API backend — data leaves this device",
+                        message: "Process names, IPs, event summaries, and past-event context are sent to the Anthropic API on every triage. Set \"backend\": \"ollama\" in config.json for fully local analysis."
                     ) { EmptyView() }
                 } else if !model.ollamaAvailable {
                     statusBanner(
