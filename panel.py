@@ -173,6 +173,20 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/models":
             data = {**list_ollama_models(), "config": read_config()}
             self._respond(200, json.dumps(data), "application/json")
+        elif self.path == "/api/baseline":
+            baseline_file = Path.home() / ".netmon" / "baseline.txt"
+            entries: list[dict] = []
+            if baseline_file.exists():
+                for line in baseline_file.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if "|" in line:
+                        process, remote = line.split("|", 1)
+                        entries.append({"entry": line, "process": process, "remote": remote})
+                    else:
+                        entries.append({"entry": line, "process": line, "remote": ""})
+            self._respond(200, json.dumps({"entries": entries, "count": len(entries)}), "application/json")
         elif self.path == "/api/pf-status":
             sudoers_ok = Path("/etc/sudoers.d/netmon").exists()
             anchor_ok  = Path("/etc/pf.anchors/netmon").exists()
@@ -314,6 +328,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._respond(200, '{"ok":true}', "application/json")
+        elif self.path == "/baseline/remove":
+            entry = str(raw_body.get("entry", "")).strip()
+            if not entry:
+                self._respond(400, '{"error":"entry required"}', "application/json"); return
+            removed = _baseline.remove_entry(Path.home() / ".netmon" / "baseline.txt", entry)
+            self._respond(200, json.dumps({"removed": removed}), "application/json")
         elif self.path == "/unblock-ip":
             body    = raw_body
             bare_ip = str(body.get("ip", "")).strip()

@@ -25,6 +25,13 @@ struct ModelEntry: Decodable, Hashable {
     let size: String
 }
 
+struct BaselineEntry: Identifiable {
+    let entry:   String   // raw "process|remote" key used for removal
+    let process: String
+    let remote:  String
+    var id: String { entry }
+}
+
 struct BlockedIPEntry: Identifiable {
     let ip:      String
     let ts:      String?
@@ -151,6 +158,8 @@ class PanelModel: ObservableObject {
     @Published var pfEnforcement     = false
     @Published var pfSudoersReady    = false
     @Published var pfAnchorReady     = false
+    @Published var baselineEntries:  [BaselineEntry] = []
+    @Published var baselineFilter    = ""
 
     var usingClaude: Bool { backendName == "claude" }
     var pfSetupNeeded: Bool { !pfSudoersReady || !pfAnchorReady }
@@ -158,6 +167,7 @@ class PanelModel: ObservableObject {
     func refresh() {
         fetchPFStatus()
         fetchBlockedIPs()
+        fetchBaseline()
         fetchEvents { [weak self] r in
             guard let self, let r else { return }
             self.pending        = r.pending
@@ -206,6 +216,39 @@ class PanelModel: ObservableObject {
                 )
             }
             DispatchQueue.main.async { self.blockedIPs = entries }
+        }.resume()
+    }
+
+    func fetchBaseline() {
+        guard let url = URL(string: "http://localhost:6543/api/baseline") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let list = obj["entries"] as? [[String: Any]] else { return }
+            let entries = list.compactMap { d -> BaselineEntry? in
+                guard let entry = d["entry"] as? String else { return nil }
+                return BaselineEntry(
+                    entry:   entry,
+                    process: d["process"] as? String ?? entry,
+                    remote:  d["remote"]  as? String ?? ""
+                )
+            }
+            DispatchQueue.main.async { self.baselineEntries = entries }
+        }.resume()
+    }
+
+    func removeBaselineEntry(_ entry: String) {
+        guard let url  = URL(string: "http://localhost:6543/baseline/remove"),
+              let data = try? JSONSerialization.data(withJSONObject: ["entry": entry]) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("localhost:6543",   forHTTPHeaderField: "Host")
+        req.httpBody = data
+        URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.fetchBaseline() }
         }.resume()
     }
 
@@ -795,7 +838,8 @@ struct PanelView: View {
         Picker("", selection: $tab) {
             Text("Pending (\(model.pending.count))").tag(0)
             Text("History (\(model.recent.count))").tag(1)
-            Text("Settings").tag(2)
+            Text("Baseline").tag(2)
+            Text("Settings").tag(3)
         }
         .pickerStyle(.segmented)
         .padding(.horizontal, 16).padding(.vertical, 8)
@@ -807,6 +851,7 @@ struct PanelView: View {
         switch tab {
         case 0:  pendingTab
         case 1:  historyTab
+        case 2:  baselineTab
         default: settingsTab
         }
     }
@@ -879,6 +924,69 @@ struct PanelView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
                 }
             }
+        }
+    }
+
+    private var baselineTab: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Search bar
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.caption)
+                TextField("Filter by process or IP…", text: $model.baselineFilter)
+                    .textFieldStyle(.plain).font(.caption)
+                if !model.baselineFilter.isEmpty {
+                    Button(action: { model.baselineFilter = "" }) {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }.buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color.secondary.opacity(0.06))
+
+            Divider()
+
+            let filtered: [BaselineEntry] = model.baselineFilter.isEmpty
+                ? model.baselineEntries
+                : model.baselineEntries.filter {
+                    $0.process.localizedCaseInsensitiveContains(model.baselineFilter) ||
+                    $0.remote.localizedCaseInsensitiveContains(model.baselineFilter)
+                  }
+
+            if filtered.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "checkmark.shield").font(.title2).foregroundStyle(.secondary)
+                    Text(model.baselineEntries.isEmpty ? "Baseline is empty" : "No matching entries")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(filtered) { entry in
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.process)
+                                .font(.system(size: 12, design: .monospaced))
+                                .fontWeight(.medium)
+                            if !entry.remote.isEmpty {
+                                Text(entry.remote)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button("Remove") { model.removeBaselineEntry(entry.entry) }
+                            .buttonStyle(.bordered).controlSize(.mini).tint(.orange)
+                    }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                }
+            }
+
+            Divider()
+            HStack {
+                Text("\(model.baselineEntries.count) entries — safe connections netmon won't alert on")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
         }
     }
 
