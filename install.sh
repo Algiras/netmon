@@ -165,7 +165,6 @@ echo "  ✓ $AGENTS/com.user.netmon.menubar.plist"
 echo ""
 echo "==> Setting menu bar visibility..."
 defaults write com.apple.controlcenter "NSStatusItem Visible netmon" -bool true
-defaults write com.apple.controlcenter "NSStatusItem Preferred Position netmon" -float 100
 
 echo ""
 echo "==> Building Swift menu bar app..."

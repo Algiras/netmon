@@ -10,9 +10,10 @@ SDK="$(xcrun --sdk macosx --show-sdk-path)"
 echo "==> Building netmon-menubar (Swift menu bar + notifier)..."
 mkdir -p "$APP/Contents/MacOS"
 xcrun swiftc -sdk "$SDK" \
-  -framework Foundation -framework AppKit -framework UserNotifications \
+  -framework Foundation -framework AppKit -framework UserNotifications -framework SwiftUI \
   "$NETMON/MenuBar/Sources/MenuBar/Notifier.swift" \
   "$NETMON/MenuBar/Sources/MenuBar/NetmonMenuBar.swift" \
+  "$NETMON/MenuBar/Sources/MenuBar/PanelWindow.swift" \
   "$NETMON/MenuBar/Sources/MenuBar/main.swift" \
   -o "$BINARY"
 
@@ -42,9 +43,9 @@ if [ -f "$BINARY" ]; then
     echo "  Menu bar: ⚡ (top right)"
     echo "  Panel:    http://localhost:6543"
     echo "  Log:      $NETMON/anomalies.log"
-    # Ensure macOS 13+ doesn't hide the status item in the overflow area
-    defaults write com.apple.controlcenter "NSStatusItem Visible netmon" -bool true
-    defaults write com.apple.controlcenter "NSStatusItem Preferred Position netmon" -float 100
+    # Ensure status item is visible and positioned in the app's own prefs domain
+    defaults write com.user.netmon.menubar "NSStatusItem Visible netmon" -bool true
+    defaults write com.user.netmon.menubar "NSStatusItem Preferred Position netmon" -float 700
     echo ""
     echo "==> Opening Notifications settings — enable NetmonMenuBar to allow alerts."
     open "x-apple.systempreferences:com.apple.preference.notifications"

@@ -21,6 +21,8 @@ struct Event: Decodable {
 
 struct NetmonConfig: Decodable {
     let autonomous_mode: Bool
+    let llm_model:   String?
+    let embed_model: String?
 }
 
 struct ApiResponse: Decodable {
@@ -63,10 +65,9 @@ func toggleAutonomousMode() {
 
 class NetmonMenuBar: NSObject {
     private let statusItem: NSStatusItem = {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.autosaveName = "netmon"
-        item.isVisible = true
-        return item
+        let s = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        s.autosaveName = "netmon"
+        return s
     }()
     private var timer: Timer?
     private var lastPendingCount = 0
@@ -90,10 +91,9 @@ class NetmonMenuBar: NSObject {
 
         if count > 0 {
             bolt.isTemplate = false
-            let tinted = bolt.tinted(with: count > 2 ? .systemRed : .systemOrange)
-            button.image = tinted
-            button.title = " \(count)"
-            button.imagePosition = .imageLeft
+            button.image = bolt.tinted(with: count > 2 ? .systemRed : .systemOrange)
+            button.title = ""
+            button.imagePosition = .imageOnly
         } else if autonomous {
             bolt.isTemplate = false
             button.image = bolt.tinted(with: .systemGreen)
@@ -252,7 +252,7 @@ class NetmonMenuBar: NSObject {
     }
 
     @objc private func openPanel() {
-        NSWorkspace.shared.open(URL(string: "http://localhost:6543")!)
+        PanelWindowController.shared.showPanel()
     }
 
     @objc private func openNotificationSettings() {
