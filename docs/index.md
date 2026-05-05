@@ -9,19 +9,29 @@ hide:
 
 ```mermaid
 flowchart LR
-    LSOF["🖥️ lsof\nevery 60 s"]
-    MON["monitor.sh\ndiff vs baseline"]
-    LOG[/"anomalies.log"/]
+    subgraph TCP ["TCP connections"]
+        LSOF["🖥️ lsof\nevery 60 s"]
+        MON["monitor.sh\ndiff vs baseline"]
+        LOG[/"anomalies.log"/]
+        LSOF --> MON --> LOG
+    end
+
+    subgraph DNS ["DNS queries"]
+        TDUMP["📡 tcpdump\nUDP :53 continuous"]
+        DMON["dns_monitor.py\nentropy · flood · TXT"]
+        TDUMP --> DMON
+    end
+
     ANA["analyze.py\nevery 5 min"]
     IG{"🛡️ Injection\nguard"}
     PP{"📋 Process\npolicy"}
     LLM["🤖 Ollama LLM\n+ RAG memory"]
-
     NOTIFY["⏳ Pending queue\nmacOS notification"]
     AUTO["✅ Auto-resolved\nautonomous mode"]
     NORM["📚 Baseline\nsilently added"]
 
-    LSOF --> MON --> LOG --> ANA
+    LOG --> ANA
+    DMON -->|"suspicious query\n→ DB event"| ANA
     ANA --> IG
     IG -->|"⚡ injection"| BLOCKED["🚫 Blocked\nCritical alert"]
     IG -->|"✓ clean"| PP
@@ -42,7 +52,7 @@ flowchart LR
 
     ---
 
-    Injection guard · process policy · volume anomaly · LLM triage · IP blocking — six independent layers that never all fail at once.
+    Injection guard · process policy · DNS exfiltration · volume anomaly · LLM triage · IP blocking — seven independent layers that never all fail at once.
 
     [:octicons-arrow-right-24: Security overview](security/index.md)
 

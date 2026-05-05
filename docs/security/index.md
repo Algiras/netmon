@@ -1,14 +1,21 @@
 # Security Features Overview
 
-netmon layers six independent detection mechanisms. No single failure can let unexpected traffic go unnoticed.
+netmon layers seven independent detection mechanisms. No single failure can let unexpected traffic go unnoticed.
 
 ## Defence pipeline
 
 ```mermaid
 flowchart LR
-    A([lsof event]) --> B
+    subgraph CAPTURE ["Capture"]
+        direction TB
+        A1(["🖥️ lsof\nTCP every 60 s"])
+        A2(["📡 tcpdump\nDNS UDP :53"])
+    end
 
     B["🛡️ Injection Guard\nRegex scan on assembled context"]
+    A1 --> B
+    A2 -->|"high entropy\nTXT flood\nsubdomain flood"| B
+
     B -->|"⚡ match"| C["BLOCKED\n🔴 Critical"]
     B -->|"✓ clean"| D
 
@@ -94,6 +101,14 @@ flowchart LR
 
     [:octicons-arrow-right-24: Details](ip-blocking.md)
 
+-   :material-dns:{ .lg .middle } **DNS Exfiltration Detection**
+
+    ---
+
+    `dns_monitor.py` captures all DNS queries via tcpdump and flags high-entropy labels, long subdomains, TXT floods, and unique-subdomain floods — the four fingerprints of DNS tunnelling.
+
+    [:octicons-arrow-right-24: Details](dns-exfil.md)
+
 </div>
 
 ---
@@ -110,6 +125,8 @@ flowchart LR
     | Volume-based data exfiltration from known processes | Volume anomaly |
     | Persistent access from known-bad IPs | IP blocking + pf |
     | Supply-chain or malware C2 beaconing | Baseline + LLM triage |
+    | DNS tunnelling / DNS exfiltration | DNS exfiltration detection |
+    | C2 channels over TXT records | DNS exfiltration detection |
 
 === "Not addressed"
 
@@ -117,6 +134,6 @@ flowchart LR
     |-------------|-----|
     | Encrypted payload inspection | lsof sees connections, not payloads |
     | Inbound connections | Only outbound TCP/UDP via `lsof -i 4` |
-    | DNS-based exfiltration | DNS is UDP/53 — not inspected at payload level |
     | Lateral LAN movement | Loopback-scoped detection only |
     | Kernel rootkits hiding from lsof | Below the detection boundary |
+    | DoH (DNS-over-HTTPS) tunnelling | Encrypted; indistinguishable from HTTPS traffic |
