@@ -470,18 +470,21 @@ def block_ip(ip: str, reason: str, process: str = "") -> str:
 
     _update_blocked_meta(bare_ip, process=process, remote=ip, reason=reason)
 
-    # Try pfctl table update (works if netmon anchor is loaded)
-    pfctl_ok = False
-    try:
-        r = subprocess.run(
-            ["pfctl", "-t", "netmon_blocked", "-T", "add", bare_ip],
-            capture_output=True, text=True, timeout=5,
-        )
-        pfctl_ok = r.returncode == 0
-    except Exception:
-        pass
+    # Enforce via pfctl only when the user has explicitly enabled pf_enforcement
+    pf_ok = False
+    if read_config().get("pf_enforcement", False):
+        try:
+            r = subprocess.run(
+                ["sudo", "pfctl", "-t", "netmon_blocked", "-T", "add", bare_ip],
+                capture_output=True, text=True, timeout=5,
+            )
+            pf_ok = r.returncode == 0
+            if not pf_ok:
+                _log(f"[BLOCK/PF-ERROR] pfctl failed for {bare_ip}: {r.stderr.strip()}")
+        except Exception as e:
+            _log(f"[BLOCK/PF-ERROR] pfctl exception for {bare_ip}: {e}")
 
-    status = "blocked via pfctl" if pfctl_ok else "added to blocklist (pfctl anchor not configured)"
+    status = "blocked via pfctl + blocklist" if pf_ok else "added to blocklist (pf enforcement off)"
     _log(f"[BLOCK] {bare_ip}: {reason} — {status}")
     return status
 
