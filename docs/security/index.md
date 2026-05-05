@@ -1,73 +1,122 @@
 # Security Features Overview
 
-netmon is built around the idea that network visibility is a security primitive. It layers multiple independent detection mechanisms so that no single failure mode lets unexpected traffic go unnoticed.
+netmon layers six independent detection mechanisms. No single failure can let unexpected traffic go unnoticed.
 
----
+## Defence pipeline
 
-## Defence layers
+```mermaid
+flowchart LR
+    A([lsof event]) --> B
 
-```
-Incoming lsof event
-        │
-        ▼
-┌───────────────────────┐
-│  1. Injection Guard   │  regex + optional LLM scan on assembled context
-└───────────┬───────────┘
-            │ pass
-            ▼
-┌───────────────────────┐
-│  2. Process Policy    │  expected CIDR check — no LLM, instant Critical alert
-└───────────┬───────────┘
-            │ pass
-            ▼
-┌───────────────────────┐
-│  3. Volume Anomaly    │  spike detection on connection count rolling average
-└───────────┬───────────┘
-            │ flagged events fed to LLM
-            ▼
-┌───────────────────────┐
-│  4. Baseline Check    │  known-safe pairs silently skipped
-└───────────┬───────────┘
-            │ new pairs
-            ▼
-┌───────────────────────┐
-│  5. LLM Triage        │  RAG-assisted analysis → tool call decision
-└───────────┬───────────┘
-            │ rejected
-            ▼
-┌───────────────────────┐
-│  6. IP Blocking       │  blocked_ips.txt + optional pf enforcement
-└───────────────────────┘
+    B["🛡️ Injection Guard\nRegex scan on assembled context"]
+    B -->|"⚡ match"| C["BLOCKED\n🔴 Critical"]
+    B -->|"✓ clean"| D
+
+    D["📋 Process Policy\nExpected CIDR check"]
+    D -->|"⚡ outside range"| E["POLICY_VIOLATION\n🔴 Critical"]
+    D -->|"✓ in range / not listed"| F
+
+    F["📚 Baseline\nKnown-safe pair?"]
+    F -->|"✓ known"| G["Silently skipped\n⚪ no alert"]
+    F -->|"🆕 new pair"| H
+
+    H["📊 Volume Check\nRolling average spike?"]
+    H -->|"⚡ spike"| I
+    H -->|"✓ normal rate"| I
+
+    I["🤖 LLM Triage\nOllama + RAG context"]
+    I --> J
+
+    J{"Tool call"}
+    J -->|"mark_as_normal"| K["Added to baseline\n🟢 Confirmed"]
+    J -->|"send_notification"| L["Pending queue\n🟡 Awaiting review"]
+    J -->|"auto_resolve confirmed"| K
+    J -->|"auto_resolve rejected"| M["IP blocked\n🔴 Rejected"]
+
+    M --> N["🔥 pf Enforcement\nKernel-level block\n(if configured)"]
 ```
 
 ---
 
 ## Layer summary
 
-| # | Layer | Docs | Bypasses LLM? |
-|---|-------|------|--------------|
-| 1 | [Injection Guard](injection-guard.md) | Regex scan on assembled triage context | No (but blocks before LLM sees it) |
-| 2 | [Process Policy](../configuration/process-policy.md) | Per-process expected CIDR ranges | Yes — instant Critical |
-| 3 | [Volume Anomaly](volume-anomaly.md) | Rolling count spike detection | No — feeds into LLM |
-| 4 | [Baseline](baseline.md) | Known-safe process×IP pairs | Yes — silently skipped |
-| 5 | LLM Triage | RAG + tool calls | — |
-| 6 | [IP Blocking & pf](ip-blocking.md) | Reject → block, optional kernel enforcement | — |
+<div class="grid cards" markdown>
+
+-   :material-shield-bug:{ .lg .middle } **Injection Guard**
+
+    ---
+
+    Regex scan on the assembled triage context before the LLM sees it. Catches attempts to hijack the AI triage pipeline via crafted hostnames or process environments.
+
+    No LLM involved — instant block.
+
+    [:octicons-arrow-right-24: Details](injection-guard.md)
+
+-   :material-clipboard-check:{ .lg .middle } **Process Policy**
+
+    ---
+
+    Per-process expected CIDR ranges. An AI agent connecting outside its declared endpoints triggers a Critical alert immediately — bypassing the LLM entirely.
+
+    No LLM involved — instant Critical.
+
+    [:octicons-arrow-right-24: Details](../configuration/process-policy.md)
+
+-   :material-book-check:{ .lg .middle } **Baseline**
+
+    ---
+
+    Known-safe `process|IP:port` pairs are silently skipped. The LLM and embedding step are never called for baselined traffic.
+
+    [:octicons-arrow-right-24: Details](baseline.md)
+
+-   :material-chart-line:{ .lg .middle } **Volume Anomaly**
+
+    ---
+
+    Rolling connection-count baseline per pair. A spike beyond 3× the average triggers an alert even for fully baselined connections.
+
+    [:octicons-arrow-right-24: Details](volume-anomaly.md)
+
+-   :material-brain:{ .lg .middle } **LLM Triage**
+
+    ---
+
+    Tool-calling local LLM with RAG context. Past decisions retrieved by cosine similarity (threshold 0.88) — no repeat prompting for already-seen patterns.
+
+    [:octicons-arrow-right-24: Architecture](../architecture.md)
+
+-   :material-fire:{ .lg .middle } **IP Blocking & pf**
+
+    ---
+
+    Rejected events block the IP in `blocked_ips.txt`. With pf enforcement, blocks are applied at the macOS kernel level — no process can reach the IP.
+
+    [:octicons-arrow-right-24: Details](ip-blocking.md)
+
+</div>
 
 ---
 
 ## Threat model
 
-netmon is designed for **local network visibility on a personal Mac**. It addresses:
+=== "Addressed"
 
-- Unexpected connections from any process (malware, supply-chain)
-- AI agent exfiltration via prompt injection (process policy)
-- Silently growing connection volume from compromised processes (volume anomaly)
-- Prompt injection into the triage LLM itself (injection guard)
-- Persistent access from previously seen malicious IPs (IP blocking)
+    | Threat | Layer |
+    |--------|-------|
+    | Unexpected connections from any process | Baseline + LLM triage |
+    | AI agent exfiltration via prompt injection | Process policy (proactive) |
+    | LLM triage hijacking via crafted content | Injection guard |
+    | Volume-based data exfiltration from known processes | Volume anomaly |
+    | Persistent access from known-bad IPs | IP blocking + pf |
+    | Supply-chain or malware C2 beaconing | Baseline + LLM triage |
 
-It does **not** address:
-- Encrypted payload inspection
-- Inbound connections (only outbound TCP/UDP via lsof)
-- DNS-based exfiltration
-- Lateral movement within a LAN
-- Kernel-level rootkits (those can hide from lsof)
+=== "Not addressed"
+
+    | Out of scope | Why |
+    |-------------|-----|
+    | Encrypted payload inspection | lsof sees connections, not payloads |
+    | Inbound connections | Only outbound TCP/UDP via `lsof -i 4` |
+    | DNS-based exfiltration | DNS is UDP/53 — not inspected at payload level |
+    | Lateral LAN movement | Loopback-scoped detection only |
+    | Kernel rootkits hiding from lsof | Below the detection boundary |

@@ -109,6 +109,7 @@ nav:
   - MCP Integration: mcp.md
   - Architecture: architecture.md
   - Troubleshooting: troubleshooting.md
+  - Glossary: glossary.md
 
 extra:
   social:
@@ -129,3 +130,7 @@ extra:
 
 extra_css:
   - assets/extra.css
+
+extra_javascript:
+  - https://unpkg.com/mermaid@11/dist/mermaid.min.js
+  - javascripts/mermaid-theme.js

@@ -2,55 +2,79 @@
 
 netmon has two operating modes that control how events are resolved.
 
+## How each mode works
+
+=== "Review mode (default)"
+
+    ```mermaid
+    sequenceDiagram
+        participant analyze.py
+        participant LLM
+        participant Notifications
+        participant You
+        participant DB
+
+        analyze.py->>LLM: event + RAG context
+        Note over LLM: available tools:<br/>send_notification<br/>mark_as_normal
+        LLM-->>analyze.py: send_notification("suspicious traffic")
+        analyze.py->>DB: insert pending event
+        analyze.py->>Notifications: macOS alert
+        Notifications->>You: "node → 198.51.100.7:443"
+        You->>analyze.py: Confirm / Reject
+        analyze.py->>DB: update status
+    ```
+
+=== "Autonomous mode"
+
+    ```mermaid
+    sequenceDiagram
+        participant analyze.py
+        participant LLM
+        participant DB
+        participant pf
+
+        analyze.py->>LLM: event + RAG context
+        Note over LLM: available tools:<br/>auto_resolve<br/>mark_as_normal
+        alt benign traffic
+            LLM-->>analyze.py: auto_resolve(decision="confirmed")
+            analyze.py->>DB: confirmed + baseline entry
+        else suspicious traffic
+            LLM-->>analyze.py: auto_resolve(decision="rejected")
+            analyze.py->>DB: rejected
+            analyze.py->>pf: block IP (if enforcement active)
+        end
+    ```
+
 ---
 
-## Review mode (default)
+## Tool availability by mode
 
-In Review mode, the LLM flags events but **you make the final call**.
-
-```
-new connection
-    └── LLM triage
-            ├── mark_as_normal   → silently added to baseline (no alert)
-            └── send_notification → pending queue + macOS notification
-                    └── You: Confirm or Reject
-```
-
-**Use Review mode when:**
-- You want full visibility into what's happening on your network
-- You're investigating a specific process or IP
-- You've just installed netmon and want to audit the initial baseline
-- The machine is handling sensitive work and you want human oversight
+| Tool | Review | Autonomous | Effect |
+|------|--------|------------|--------|
+| `send_notification` | ✅ | ❌ | Creates pending event + macOS alert |
+| `auto_resolve` | ❌ | ✅ | Direct confirm or reject, no human step |
+| `mark_as_normal` | ✅ | ✅ | Silent baseline entry, no alert |
 
 ---
 
-## Autonomous mode
+## Choosing a mode
 
-In Autonomous mode, the LLM resolves events **without human review**.
-
+```mermaid
+flowchart TD
+    A([Start]) --> B{Baseline stable?}
+    B -->|"No — first day,\nmany alerts"| C[Autonomous mode\nLet LLM build baseline quickly]
+    B -->|"Yes — quiet,\nnormal traffic"| D{Sensitive work?}
+    D -->|"Yes — AI agents running,\nhandling secrets"| E[Review mode\nHuman oversight on every flag]
+    D -->|"No — background usage"| F{Trust LLM\naccuracy?}
+    F -->|"Yes — granite4.1:3b\nhas been accurate"| G[Autonomous mode\nPassive protection]
+    F -->|"Not sure"| E
 ```
-new connection
-    └── LLM triage
-            ├── mark_as_normal     → silently added to baseline
-            └── auto_resolve       → confirmed or rejected directly
-                    ├── confirmed  → added to baseline
-                    └── rejected   → IP flagged (+ blocked if pf enabled)
-```
-
-**Use Autonomous mode when:**
-- The baseline is stable and alerts are mostly routine
-- You want to run netmon passively in the background
-- You're away from your machine and want protection without noise
-- You trust the LLM model's judgment for your typical traffic
-
-!!! warning "Autonomous mode bypasses human review"
-    In Autonomous mode, suspicious connections are rejected and IPs blocked without your confirmation. False positives can disrupt connectivity. Start with Review mode until you're confident in the baseline.
 
 ---
 
 ## Switching modes
 
-**From the panel** — click the **Auto** button in the panel header. It toggles between `👁 Review` and `🤖 Auto`.
+**From the panel** — click the **Auto** / **Review** button in the panel header.
 
 **From the API:**
 
@@ -70,18 +94,12 @@ curl -X POST http://localhost:6543/config \
   -d '{"autonomous": false}'
 ```
 
-The mode is persisted in `~/.netmon/config.json` and survives restarts.
+Mode is persisted in `config.json` and survives restarts.
 
 ---
 
-## How the LLM decides in each mode
+!!! warning "Autonomous mode bypasses human review"
+    In Autonomous mode, suspicious connections are rejected and IPs blocked without your confirmation. A false positive can disrupt connectivity to a legitimate service. Start with Review mode and switch to Autonomous only after the baseline is stable.
 
-The LLM receives the same context regardless of mode: the event details, RAG-retrieved past decisions, and the current baseline. The only difference is which tools are available:
-
-| Tool | Review mode | Autonomous mode |
-|------|-------------|-----------------|
-| `send_notification` | Available | Not available |
-| `auto_resolve` | Not available | Available |
-| `mark_as_normal` | Available | Available |
-
-In Review mode, the LLM must use `send_notification` for anything suspicious. In Autonomous mode, it calls `auto_resolve(decision="confirmed")` or `auto_resolve(decision="rejected")` directly.
+!!! tip "Heartbeat catches LLM indecision"
+    If the LLM is uncertain and doesn't call a tool, the event stays pending. The 60-second heartbeat re-evaluates all pending events with updated RAG context — most resolve within a few minutes.
