@@ -292,7 +292,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         case "CONFIRM": postAction(id: Int(notifID) ?? 0, action: "confirmed")
         case "REJECT":  postAction(id: Int(notifID) ?? 0, action: "rejected")
         case UNNotificationDefaultActionIdentifier:
-            NSWorkspace.shared.open(URL(string: "http://localhost:6543")!)
+            DispatchQueue.main.async {
+                PanelWindowController.shared.showPanel()
+            }
         default: break
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in

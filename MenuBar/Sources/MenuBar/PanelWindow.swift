@@ -11,7 +11,7 @@ struct ModelEntry: Decodable, Hashable {
 struct OllamaModels: Decodable {
     let llm:   [ModelEntry]
     let embed: [ModelEntry]
-    let config: [String: String]?
+    let config: NetmonConfig?
 }
 
 // ── View-model ────────────────────────────────────────────────────────────────
