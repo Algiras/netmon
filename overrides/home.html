@@ -1,0 +1,112 @@
+{% extends "main.html" %}
+
+{% block tabs %}
+{{ super() }}
+
+<style>
+  .mdx-hero {
+    color: var(--md-primary-bg-color);
+    background: linear-gradient(135deg, #4527a0 0%, #7c3aed 50%, #9333ea 100%);
+  }
+  .mdx-hero .md-grid {
+    padding-top: 3rem;
+    padding-bottom: 4rem;
+  }
+  .mdx-hero__content {
+    max-width: 640px;
+    margin: 0 auto;
+    text-align: center;
+  }
+  .mdx-hero__content h1 {
+    font-size: 3rem;
+    font-weight: 800;
+    margin-bottom: 1rem;
+    color: #fff;
+  }
+  .mdx-hero__content p {
+    font-size: 1.2rem;
+    opacity: 0.9;
+    margin-bottom: 2rem;
+    color: #e9d5ff;
+  }
+  .mdx-hero__actions {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .mdx-hero__actions .md-button {
+    border-radius: 2rem;
+    padding: 0.6rem 1.8rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .mdx-hero__actions .md-button--primary {
+    background: #fff;
+    color: #7c3aed;
+    border-color: #fff;
+  }
+  .mdx-hero__actions .md-button--primary:hover {
+    background: #f5f3ff;
+  }
+  .mdx-hero__actions .md-button:not(.md-button--primary) {
+    border-color: rgba(255,255,255,0.5);
+    color: #fff;
+  }
+  .mdx-hero__actions .md-button:not(.md-button--primary):hover {
+    border-color: #fff;
+    background: rgba(255,255,255,0.1);
+  }
+  .mdx-hero__badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 2rem;
+    padding: 0.3rem 1rem;
+    font-size: 0.8rem;
+    margin-bottom: 1.5rem;
+    color: #e9d5ff;
+  }
+  .mdx-screenshot {
+    margin: 3rem auto 0;
+    max-width: 680px;
+    border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.4);
+    border: 1px solid rgba(255,255,255,0.1);
+    overflow: hidden;
+  }
+  .mdx-screenshot img {
+    display: block;
+    width: 100%;
+  }
+</style>
+
+<section class="mdx-hero">
+  <div class="md-grid md-typeset">
+    <div class="mdx-hero__content">
+      <span class="mdx-hero__badge">⚡ On-device · Private · Open source</span>
+      <h1>Network anomaly<br>monitor for macOS</h1>
+      <p>
+        AI-assisted triage for every outbound connection.<br>
+        Local LLM, RAG memory, menu bar app — nothing leaves your Mac.
+      </p>
+      <div class="mdx-hero__actions">
+        <a href="getting-started/" class="md-button md-button--primary">
+          Get started
+        </a>
+        <a href="https://github.com/Algiras/netmon" class="md-button">
+          View on GitHub
+        </a>
+      </div>
+      <div class="mdx-screenshot">
+        <img src="assets/screenshots/panel-pending.png" alt="netmon panel showing a pending alert">
+      </div>
+    </div>
+  </div>
+</section>
+
+{% endblock %}
+
+{% block content %}
+{{ super() }}
+{% endblock %}
