@@ -7,20 +7,29 @@ hide:
 
 ## How it works
 
-```
-lsof (every 60 s) → diff vs baseline → [ANOMALY] log
-                                              │
-                                        analyze.py (every 5 min)
-                                              │
-                                    ┌─────────┴──────────┐
-                              injection guard       process policy
-                                              │
-                                    Ollama LLM + RAG
-                                              │
-                              ┌───────────────┼──────────────┐
-                        send_notification  auto_resolve  mark_as_normal
-                              │                │               │
-                         pending queue    autonomous       baseline
+```mermaid
+flowchart LR
+    LSOF["🖥️ lsof\nevery 60 s"]
+    MON["monitor.sh\ndiff vs baseline"]
+    LOG[/"anomalies.log"/]
+    ANA["analyze.py\nevery 5 min"]
+    IG{"🛡️ Injection\nguard"}
+    PP{"📋 Process\npolicy"}
+    LLM["🤖 Ollama LLM\n+ RAG memory"]
+
+    NOTIFY["⏳ Pending queue\nmacOS notification"]
+    AUTO["✅ Auto-resolved\nautonomous mode"]
+    NORM["📚 Baseline\nsilently added"]
+
+    LSOF --> MON --> LOG --> ANA
+    ANA --> IG
+    IG -->|"⚡ injection"| BLOCKED["🚫 Blocked\nCritical alert"]
+    IG -->|"✓ clean"| PP
+    PP -->|"⚡ outside CIDR"| VIOLATION["🚨 Policy violation\nCritical alert"]
+    PP -->|"✓ ok"| LLM
+    LLM -->|"send_notification"| NOTIFY
+    LLM -->|"auto_resolve"| AUTO
+    LLM -->|"mark_as_normal"| NORM
 ```
 
 ---
