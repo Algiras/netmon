@@ -44,12 +44,16 @@ func fetchEvents(completion: @escaping (ApiResponse?) -> Void) {
     }.resume()
 }
 
-func postAction(id: Int, action: String) {
+func postAction(id: Int, action: String, blockIPAlso: Bool = false) {
     guard let url = URL(string: "http://localhost:6543/action") else { return }
     var req = URLRequest(url: url)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    req.httpBody = "{\"id\":\(id),\"action\":\"\(action)\"}".data(using: .utf8)
+    req.setValue("localhost:6543", forHTTPHeaderField: "Host")
+    var body = "{\"id\":\(id),\"action\":\"\(action)\""
+    if blockIPAlso { body += ",\"block_ip_also\":true" }
+    body += "}"
+    req.httpBody = body.data(using: .utf8)
     URLSession.shared.dataTask(with: req).resume()
 }
 

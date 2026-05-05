@@ -252,6 +252,10 @@ class PanelModel: ObservableObject {
         postAction(id: id, action: "rejected")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
     }
+    func rejectAndBlock(_ id: Int) {
+        postAction(id: id, action: "rejected", blockIPAlso: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
+    }
     func revert(_ id: Int) {
         postAction(id: id, action: "revert")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
@@ -373,12 +377,14 @@ class PanelModel: ObservableObject {
 
 struct EventRow: View {
     let event: Event
-    var ipRep:     IPRepInfo? = nil
-    var onConfirm: (() -> Void)? = nil
-    var onReject:  (() -> Void)? = nil
-    var onRevert:  (() -> Void)? = nil
+    var ipRep:            IPRepInfo? = nil
+    var onConfirm:        (() -> Void)? = nil
+    var onReject:         (() -> Void)? = nil
+    var onRejectAndBlock: (() -> Void)? = nil
+    var onRevert:         (() -> Void)? = nil
 
-    @State private var expanded = false
+    @State private var expanded      = false
+    @State private var blockOnReject = false
 
     var body: some View {
         let parsed      = parseSummary(event.summary)
@@ -551,24 +557,39 @@ struct EventRow: View {
 
             // ── Actions ───────────────────────────────────────────────────────
             if let confirm = onConfirm, let reject = onReject {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Button("✓ Confirm", action: confirm)
                             .buttonStyle(.borderedProminent).tint(.green)
                             .help("Adds this connection to your safe baseline — it won't alert again")
-                        Button("✗ Reject", action: reject)
-                            .buttonStyle(.borderedProminent).tint(.red)
-                            .help("Flags as suspicious — similar connections will trigger alerts")
+                        Button("✗ Reject") {
+                            if blockOnReject, let rejectAndBlock = onRejectAndBlock {
+                                rejectAndBlock()
+                            } else {
+                                reject()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent).tint(.red)
+                        .help(blockOnReject
+                              ? "Flags as suspicious AND adds IP to the block list"
+                              : "Flags as suspicious — similar connections will trigger alerts")
                         Spacer()
                         Button(action: { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } }) {
-                            Text(expanded ? "Less" : "Full review")
-                                .font(.caption)
+                            Text(expanded ? "Less" : "Full review").font(.caption)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
+                        .buttonStyle(.bordered).controlSize(.mini)
                     }
-                    Text("Confirm → adds to safe baseline · Reject → flags as suspicious")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                    HStack(spacing: 6) {
+                        if onRejectAndBlock != nil {
+                            Toggle("Also block IP", isOn: $blockOnReject)
+                                .toggleStyle(.checkbox)
+                                .font(.caption2)
+                        }
+                        Text(blockOnReject
+                             ? "Reject → flags suspicious + adds to block list"
+                             : "Confirm → safe baseline · Reject → flags suspicious")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
             } else {
                 // History row: show who/what decided
@@ -783,11 +804,13 @@ struct PanelView: View {
                         Divider()
                     }
                     List(model.pending, id: \.id) { e in
+                        let hasRealIP = !e.remote.hasPrefix("unknown") && e.remote != "unknown"
                         EventRow(
-                            event:     e,
-                            ipRep:     model.ipRepCache[String(e.remote.split(separator: ":").first ?? Substring(e.remote))],
-                            onConfirm: { model.confirm(e.id) },
-                            onReject:  { model.reject(e.id) }
+                            event:            e,
+                            ipRep:            model.ipRepCache[String(e.remote.split(separator: ":").first ?? Substring(e.remote))],
+                            onConfirm:        { model.confirm(e.id) },
+                            onReject:         { model.reject(e.id) },
+                            onRejectAndBlock: hasRealIP ? { model.rejectAndBlock(e.id) } : nil
                         )
                         .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
                     }

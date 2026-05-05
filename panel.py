@@ -51,6 +51,38 @@ def _remove_blocked_meta(bare_ip: str):
         pass
 
 
+def _write_blocked_meta(bare_ip: str, process: str, remote: str, reason: str):
+    """Add or update the metadata entry for a blocked IP."""
+    from datetime import datetime as _dt
+    try:
+        meta = json.loads(_BLOCKED_META_FILE.read_text()) if _BLOCKED_META_FILE.exists() else {}
+    except Exception:
+        meta = {}
+    meta[bare_ip] = {
+        "ts":      _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "process": process,
+        "remote":  remote,
+        "reason":  reason,
+    }
+    _BLOCKED_META_FILE.write_text(json.dumps(meta, indent=2))
+
+
+def _do_block_ip(bare_ip: str, process: str, remote: str, reason: str):
+    """Add bare_ip to blocked_ips.txt + metadata. Best-effort pfctl."""
+    import subprocess as _sp
+    blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
+    existing = set(blocked_file.read_text().splitlines()) if blocked_file.exists() else set()
+    if bare_ip not in existing:
+        with blocked_file.open("a") as f:
+            f.write(bare_ip + "\n")
+    _write_blocked_meta(bare_ip, process=process, remote=remote, reason=reason)
+    try:
+        _sp.run(["pfctl", "-t", "netmon_blocked", "-T", "add", bare_ip],
+                capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 def _cascade_decision(event_id: int, decision: str) -> int:
     """After a manual confirm/reject, auto-resolve similar pending events in one transaction."""
     return db.cascade_decision(event_id, decision, RAG_CASCADE_SIM)
@@ -228,6 +260,21 @@ class Handler(BaseHTTPRequestHandler):
                     Path.home() / ".netmon" / "baseline.txt",
                     f"{row['process']}|{row['remote']}",
                 )
+
+            # If rejected with block_ip_also=true, also block the IP
+            if action == "rejected" and body.get("block_ip_also") and row:
+                bare_ip = row["remote"].split(":")[0]
+                import ipaddress as _ipmod
+                try:
+                    bare_ip = str(_ipmod.ip_address(bare_ip))
+                    _do_block_ip(
+                        bare_ip,
+                        process = row["process"],
+                        remote  = row["remote"],
+                        reason  = "Manually rejected and blocked from review panel",
+                    )
+                except ValueError:
+                    pass
 
             # Revert: reset to pending, undo baseline/block side-effects
             if action == "revert" and row:
