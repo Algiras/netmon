@@ -10,14 +10,14 @@ MAX_LOG_LINES=5000
 
 mkdir -p "$NETMON_DIR"
 
-# Capture ESTABLISHED IPv4 connections: "process|remote_ip:port"
+# Capture ESTABLISHED TCP connections (IPv4 + IPv6): "process|remote_ip:port"
 # Uses NF-1 (second-to-last field) which is always the address in lsof -n -P output
-lsof -i 4 -n -P 2>/dev/null \
+lsof -i tcp -n -P 2>/dev/null \
   | awk '/ESTABLISHED/ && $(NF-1) ~ /->/ {
       split($(NF-1), a, "->")
       print $1 "|" a[2]
     }' \
-  | grep -v '127\.0\.0\.1:\|^$' \
+  | grep -v '127\.0\.0\.1:\|^\[::1\]\|^$' \
   | sort -u > "$CURRENT"
 
 # First run: create baseline and exit
