@@ -11,7 +11,7 @@ Local network anomaly monitor for macOS. Detects suspicious outbound connections
 ```
 lsof (60s) ──► anomalies.log ──► analyze.py (5 min) ──► notifications
                                        │                       │
-                               embed + RAG lookup         panel UI
+                               embed + RAG lookup         panel UI / MCP
                                (nomic-embed-text)    localhost:6543
                                        │
                                Ollama LLM (tool calls)
@@ -19,6 +19,9 @@ lsof (60s) ──► anomalies.log ──► analyze.py (5 min) ──► notifi
                                ├─ send_notification   → queues for review
                                ├─ auto_resolve        → autonomous confirm/reject
                                └─ mark_as_normal      → adds to baseline
+
+ confirm/reject ──► RAG cascade: similar pending events auto-resolved
+                    (cosine similarity ≥ 0.88 across stored embeddings)
 ```
 
 ### Components
@@ -121,7 +124,7 @@ No Ollama required — all network calls are mocked.
 
 ```bash
 cd ~/.netmon && python3 -m pytest tests/ -v
-# 31 passed
+# 72 passed
 ```
 
 ---
@@ -142,6 +145,68 @@ bash ~/.netmon/build.sh
 ~/.netmon/menubar.err      # Swift app crash log
 ~/.netmon/panel.log        # HTTP access log
 ```
+
+---
+
+## Claude Code MCP Integration
+
+netmon ships an MCP server that lets Claude Code read and act on anomaly events directly from any conversation.
+
+### Setup
+
+```bash
+# Register the server (one-time)
+claude mcp add netmon -- uvx --from "mcp[cli]" python ~/.netmon/netmon_mcp.py
+
+# Verify it connected
+claude mcp list   # should show: netmon: ✓ Connected
+```
+
+### Available tools
+
+| Tool | What it does |
+|------|-------------|
+| `get_pending_events` | List anomaly events waiting for a decision |
+| `get_recent_events` | List recently resolved events |
+| `confirm_event(id)` | Mark benign — adds to baseline, cascades to similar events |
+| `reject_event(id)` | Mark suspicious — cascades to similar events |
+| `revert_event(id)` | Reset to pending for re-review |
+| `read_anomaly_log(lines)` | Tail the raw detection log |
+| `get_config` | Show current config (mode, models) |
+| `set_autonomous_mode(bool)` | Enable/disable autonomous LLM resolution |
+| `set_model(name, type)` | Change LLM or embedding model |
+| `list_available_models` | Show installed Ollama models by capability |
+
+### Example prompts
+
+```
+"Show me pending netmon events"
+"Reject event 32 — that ncat connection looks like a reverse shell"
+"What has netmon flagged in the last hour?"
+"Switch netmon to autonomous mode"
+```
+
+---
+
+## RAG Memory & Cascade
+
+Every event is embedded (nomic-embed-text) and stored in SQLite. When you confirm or reject an event:
+
+1. **Cascade** — all pending events with cosine similarity ≥ 0.88 are auto-resolved with the same decision.
+2. **Sweep** — at each analysis cycle, any pending events similar to already-decided events are resolved automatically.
+
+This means approving one `Google → CDN IP` confirms the whole cluster, and you only need to decide each pattern once.
+
+---
+
+## Security
+
+- **Host header check** — panel only accepts requests from `localhost:6543` / `127.0.0.1:6543` (DNS-rebinding protection)
+- **Input validation** — process names and IPs validated before use in shell/SQL; model names matched against allowlist regex
+- **AppleScript injection** — double-quotes stripped from notification text before `osascript`
+- **Tool result screening** — LLM tool output checked for prompt-injection patterns before re-entering the LLM context
+- **Baseline sort integrity** — `baseline.txt` always written sorted; `comm -23` requires sorted input on both sides
+- **Content-Length cap** — panel POST body limited to 64 KB
 
 ---
 
