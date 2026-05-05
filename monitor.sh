@@ -48,7 +48,8 @@ if [ -n "$ANOMALIES" ]; then
     # Show up to 3 connections in the notification
     MSG=$(printf '%s\n' "${NOTIF_LINES[@]}" | head -3 | paste -sd ',' - | sed 's/,/, /g')
     [ ${#NOTIF_LINES[@]} -gt 3 ] && MSG="$MSG (+$((${#NOTIF_LINES[@]}-3)) more)"
-    SAFE_MSG="${MSG//\"/\'}"
+    SAFE_MSG="${MSG//\\/\\\\}"  # escape backslashes first
+    SAFE_MSG="${SAFE_MSG//\"/\'}"
     osascript -e "display notification \"$SAFE_MSG\" with title \"⚠️ New Network Connection\" sound name \"Basso\"" 2>/dev/null
   fi
 fi

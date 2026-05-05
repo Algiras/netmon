@@ -151,8 +151,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._check_host():
             self._respond(403, '{"error":"forbidden"}', "application/json"); return
         length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY)
+        try:
+            raw_body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, ValueError):
+            self._respond(400, '{"error":"invalid JSON"}', "application/json"); return
         if self.path == "/config":
-            body   = json.loads(self.rfile.read(length))
+            body   = raw_body
             cfg    = read_config()
             clear_emb = body.pop("_clear_embeddings", False)
             if "toggle" in body:
@@ -179,23 +183,30 @@ class Handler(BaseHTTPRequestHandler):
                 db.clear_embeddings()
             self._respond(200, json.dumps(cfg), "application/json")
         elif self.path == "/action":
-            body   = json.loads(self.rfile.read(length))
+            body   = raw_body
             action = body.get("action", "")
             if action not in _ALLOWED_ACTIONS:
                 self._respond(400, '{"error":"invalid action"}', "application/json"); return
 
+            try:
+                event_id = int(body["id"])
+                if event_id <= 0:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                self._respond(400, '{"error":"invalid id"}', "application/json"); return
+
             with db._conn() as c:
                 row = c.execute(
-                    "SELECT process,remote,status FROM events WHERE id=?", (body["id"],)
+                    "SELECT process,remote,status FROM events WHERE id=?", (event_id,)
                 ).fetchone()
 
             if row is None:
                 self._respond(404, '{"error":"event not found"}', "application/json"); return
 
             if action != "revert":
-                db.update_status(int(body["id"]), action)
+                db.update_status(event_id, action)
                 if action in ("confirmed", "rejected"):
-                    _cascade_decision(int(body["id"]), action)
+                    _cascade_decision(event_id, action)
 
             # If confirmed, add to baseline (sorted — comm requires sorted input)
             if action == "confirmed" and row:
@@ -208,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # Revert: reset to pending, undo baseline/block side-effects
             if action == "revert" and row:
-                db.update_status(int(body["id"]), "pending")
+                db.update_status(event_id, "pending")
                 # Remove from baseline if it was confirmed
                 baseline = Path.home() / ".netmon" / "baseline.txt"
                 entry = f"{row['process']}|{row['remote']}"
@@ -230,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
 
             self._respond(200, '{"ok":true}', "application/json")
         elif self.path == "/unblock-ip":
-            body    = json.loads(self.rfile.read(length))
+            body    = raw_body
             bare_ip = str(body.get("ip", "")).strip()
             import ipaddress as _ipmod
             try:

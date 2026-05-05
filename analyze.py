@@ -116,8 +116,18 @@ TOOLS = [
                     "title":    {"type": "string", "description": "Short alert title (≤50 chars)"},
                     "message":  {"type": "string", "description": "What was detected and why suspicious (≤200 chars)"},
                     "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+                    "recommended_action": {
+                        "type": "string",
+                        "enum": ["confirm", "reject", "block_ip", "kill_process", "investigate"],
+                        "description": (
+                            "Concrete next step. Always provide this. "
+                            "confirm=looks safe, reject=flag as suspicious, "
+                            "block_ip=firewall the remote IP, kill_process=terminate the process, "
+                            "investigate=need more info"
+                        ),
+                    },
                 },
-                "required": ["process", "remote", "title", "message", "severity"],
+                "required": ["process", "remote", "title", "message", "severity", "recommended_action"],
             },
         },
     },
@@ -239,14 +249,20 @@ TOOLS = [
 
 # ── Tool implementations ───────────────────────────────────────────────────────
 
-def send_notification(process, remote, title, message, severity) -> str:
+def send_notification(process, remote, title, message, severity,
+                      recommended_action: str = "investigate") -> str:
     icons = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
+    _VALID_ACTIONS = {"confirm", "reject", "block_ip", "kill_process", "investigate"}
+    if recommended_action not in _VALID_ACTIONS:
+        recommended_action = "investigate"
+
+    summary_text = f"[{recommended_action.upper()}] {title}: {message}"
 
     # Insert into DB first to get the row ID (needed for notification action callbacks)
     vector   = emb.embed_event(process, remote, message)
     event_id = db.insert_event(
         process=process, remote=remote,
-        severity=severity, summary=f"{title}: {message}",
+        severity=severity, summary=summary_text,
         embedding=vector,
     )
 
@@ -259,9 +275,9 @@ def send_notification(process, remote, title, message, severity) -> str:
         )
     else:
         sounds  = {"info": "Glass", "warning": "Basso", "critical": "Sosumi"}
-        # Strip double-quotes to prevent AppleScript injection
-        safe_msg     = message.replace('"', "'")
-        safe_heading = f"{icons.get(severity,'⚠️')} {title}".replace('"', "'")
+        # Strip backslashes and double-quotes to prevent AppleScript injection
+        safe_msg     = message.replace('\\', '\\\\').replace('"', "'")
+        safe_heading = f"{icons.get(severity,'⚠️')} {title}".replace('\\', '\\\\').replace('"', "'")
         subprocess.Popen(
             ["osascript", "-e",
              f'display notification "{safe_msg}" '
@@ -269,11 +285,14 @@ def send_notification(process, remote, title, message, severity) -> str:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
-    _log(f"[NOTIFY/{severity.upper()}] {title}: {message}")
+    _log(f"[NOTIFY/{severity.upper()}] [{recommended_action.upper()}] {title}: {message}")
     return "queued for review"
 
 
 def auto_resolve(process, remote, decision, reason) -> str:
+    if decision not in ("confirmed", "rejected"):
+        _log(f"[AUTO/INVALID] Rejected unknown decision: {decision!r}")
+        return f"invalid decision: {decision!r} — must be 'confirmed' or 'rejected'"
     vector   = emb.embed_event(process, remote, reason)
     severity = "info" if decision == "confirmed" else "warning"
     summary  = f"[AUTO-{decision.upper()}] {reason}"
@@ -474,6 +493,8 @@ def _enrich_ips(parsed: list[dict]) -> str:
     if not unique_ips:
         return ""
 
+    unique_ips = unique_ips[:100]  # cap batch size
+
     # Single batch request for all IPs
     lines_out: list[str] = ["── IP Reputation (ip-api.com) ──"]
     try:
@@ -492,12 +513,12 @@ def _enrich_ips(parsed: list[dict]) -> str:
         for ip, d in zip(unique_ips, results):
             if d.get("status") == "success":
                 hosting = " [HOSTING]" if d.get("hosting") else ""
-                entry = (
-                    f"  {ip}: {d.get('country','?')} | "
-                    f"{d.get('isp','?')} | "
-                    f"{d.get('org','?')} | "
-                    f"{d.get('as','?')}{hosting}"
-                )
+                # Sanitize API response fields before injecting into LLM context
+                country = sanitize_field(str(d.get("country", "?")), max_len=64)
+                isp     = sanitize_field(str(d.get("isp", "?")), max_len=64)
+                org     = sanitize_field(str(d.get("org", "?")), max_len=64)
+                asn     = sanitize_field(str(d.get("as", "?")), max_len=64)
+                entry = f"  {ip}: {country} | {isp} | {org} | {asn}{hosting}"
             else:
                 entry = f"  {ip}: no data"
             lines_out.append(entry)
@@ -517,11 +538,12 @@ def dispatch(name: str, args: dict) -> str:
             args = {}
     if name == "send_notification":
         return send_notification(
-            process  = args.get("process", "unknown"),
-            remote   = args.get("remote",  "unknown"),
-            title    = args.get("title",   "Network Alert"),
-            message  = args.get("message", ""),
-            severity = args.get("severity","warning"),
+            process              = args.get("process", "unknown"),
+            remote               = args.get("remote",  "unknown"),
+            title                = args.get("title",   "Network Alert"),
+            message              = args.get("message", ""),
+            severity             = args.get("severity","warning"),
+            recommended_action   = args.get("recommended_action", "investigate"),
         )
     if name == "auto_resolve":
         return auto_resolve(
@@ -630,11 +652,20 @@ def check_injection(context: str) -> bool:
         tools=None,
         timeout=15,
     )
+    if not resp:
+        # Fail-close: if the guard can't respond, block the context to prevent
+        # semantic injections slipping through when Ollama is temporarily unavailable.
+        _log("[GUARD] LLM guard unavailable — blocking context (fail-close)")
+        return True
     verdict = resp.get("message", {}).get("content", "").strip().upper()
     if verdict.startswith("INJECTION"):
-        _log(f"[GUARD] LLM flagged injection attempt — blocking context")
+        _log("[GUARD] LLM flagged injection attempt — blocking context")
         return True
-    return False
+    if verdict.startswith("SAFE"):
+        return False
+    # Unknown verdict → fail-close
+    _log(f"[GUARD] Unexpected guard verdict {verdict!r} — blocking context (fail-close)")
+    return True
 
 
 # ── Ollama ─────────────────────────────────────────────────────────────────────
@@ -693,6 +724,8 @@ def run_with_tools(messages: list) -> str:
 
 def _setup_logger() -> logging.Logger:
     ANALYSIS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    ANALYSIS_LOG.touch(exist_ok=True)
+    ANALYSIS_LOG.chmod(0o600)
     logger = logging.getLogger("netmon")
     if logger.handlers:
         return logger
@@ -820,6 +853,14 @@ Decision guide:
 • kill_process: only if a process is actively exfiltrating or clearly malicious.
 • block_ip: only for confirmed malicious IPs, not just unusual ones.
 
+REQUIRED for every send_notification call:
+  recommended_action must always be set to the most appropriate value:
+  - "confirm": likely safe, just needs human sign-off
+  - "reject": flag as suspicious in the DB
+  - "block_ip": firewall the remote IP immediately
+  - "kill_process": terminate the process
+  - "investigate": need more information before deciding
+
 Past events with status='confirmed' are approved by the user — treat similarly.
 Past events with status='rejected' are suspicious — alert if seen again.
 
@@ -837,6 +878,7 @@ For every event call exactly one tool:
   non-standard ports, repeated scanning pattern, matches a previously-rejected event in memory).
 • send_notification: ONLY for critical active threats needing immediate human attention
   (e.g. data exfiltration in progress, known malware IPs, reverse shell indicators).
+  Always include recommended_action (block_ip / kill_process / investigate).
 • get_process_info: call when you need more context before acting.
 • check_ip_reputation: call for unfamiliar IPs — hosting/datacenter flag and org name are key signals.
 • kill_process: use when a process is actively exfiltrating — confirm first with get_process_info.
