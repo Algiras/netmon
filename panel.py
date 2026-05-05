@@ -115,14 +115,15 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/action":
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
-            db.update_status(int(body["id"]), body["action"])
-
             action = body["action"]
 
             with db._conn() as c:
                 row = c.execute(
                     "SELECT process,remote,status FROM events WHERE id=?", (body["id"],)
                 ).fetchone()
+
+            if action != "revert":
+                db.update_status(int(body["id"]), action)
 
             # If confirmed, add to baseline
             if action == "confirmed" and row:

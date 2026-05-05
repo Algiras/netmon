@@ -3,6 +3,8 @@
 Reads embedding model from config.json (key: embed_model).
 """
 
+from __future__ import annotations
+
 import json
 import urllib.request
 from pathlib import Path

@@ -135,5 +135,82 @@ class TestMarkAsNormal(unittest.TestCase):
             self.assertEqual(baseline.read_text().count("chrome|5.6.7.8:443"), 1)
 
 
+class TestBlockIp(unittest.TestCase):
+    def test_writes_to_blocked_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(analyze, "NETMON_DIR", Path(d)), \
+                 patch.object(analyze, "BLOCKED_FILE", Path(d) / "blocked_ips.txt"), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                analyze.block_ip("1.2.3.4", "known C2")
+            blocked = (Path(d) / "blocked_ips.txt").read_text()
+            self.assertIn("1.2.3.4", blocked)
+
+    def test_strips_port_from_ip(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(analyze, "BLOCKED_FILE", Path(d) / "blocked_ips.txt"), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                analyze.block_ip("1.2.3.4:4444", "port included by mistake")
+            blocked = (Path(d) / "blocked_ips.txt").read_text().strip()
+            self.assertEqual(blocked, "1.2.3.4")
+
+    def test_no_duplicate_entries(self):
+        with tempfile.TemporaryDirectory() as d:
+            bf = Path(d) / "blocked_ips.txt"
+            bf.write_text("1.2.3.4\n")
+            with patch.object(analyze, "BLOCKED_FILE", bf), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                analyze.block_ip("1.2.3.4", "duplicate")
+            self.assertEqual(bf.read_text().count("1.2.3.4"), 1)
+
+
+class TestKillProcess(unittest.TestCase):
+    def test_returns_killed_on_success(self):
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")) as mock:
+            result = analyze.kill_process("malware", "exfiltrating data")
+        mock.assert_called_once()
+        self.assertIn("killed", result)
+
+    def test_uses_sigkill_when_force(self):
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")) as mock:
+            analyze.kill_process("malware", "force kill", force=True)
+        args = mock.call_args[0][0]
+        self.assertIn("-9", args)
+
+    def test_returns_failure_message_on_error(self):
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="no process found")):
+            result = analyze.kill_process("nonexistent", "test")
+        self.assertIn("kill failed", result)
+
+
+class TestGetProcessInfo(unittest.TestCase):
+    def test_returns_lsof_output(self):
+        fake_lsof = MagicMock(returncode=0, stdout="COMMAND  PID  USER\npython3  1234 user")
+        fake_ps   = MagicMock(returncode=0, stdout="USER PID\nuser 1234 python3")
+        with patch("subprocess.run", side_effect=[fake_lsof, fake_ps]):
+            result = analyze.get_process_info("python3")
+        self.assertIn("python3", result)
+
+    def test_returns_not_found_when_empty(self):
+        fake = MagicMock(returncode=0, stdout="")
+        with patch("subprocess.run", side_effect=[fake, fake]):
+            result = analyze.get_process_info("nonexistentproc")
+        self.assertIn("No info found", result)
+
+    def test_dispatch_routes_get_process_info(self):
+        with patch("analyze.get_process_info", return_value="info") as mock:
+            analyze.dispatch("get_process_info", {"process_name": "python3"})
+        mock.assert_called_once_with("python3")
+
+    def test_dispatch_routes_kill_process(self):
+        with patch("analyze.kill_process", return_value="killed") as mock:
+            analyze.dispatch("kill_process", {"process_name": "malware", "reason": "bad", "force": True})
+        mock.assert_called_once_with(process_name="malware", reason="bad", force=True)
+
+    def test_dispatch_routes_block_ip(self):
+        with patch("analyze.block_ip", return_value="blocked") as mock:
+            analyze.dispatch("block_ip", {"ip": "1.2.3.4", "reason": "C2"})
+        mock.assert_called_once_with(ip="1.2.3.4", reason="C2")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

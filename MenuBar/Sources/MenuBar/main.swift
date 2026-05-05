@@ -261,7 +261,10 @@ class NetmonMenuBar: NSObject {
 
     @objc private func runAnalysis() {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        // Use homebrew python3 — analyze.py requires 3.10+ (type union syntax)
+        let py = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3")
+            ? "/opt/homebrew/bin/python3" : "/usr/bin/python3"
+        task.executableURL = URL(fileURLWithPath: py)
         task.arguments     = ["\(NSHomeDirectory())/.netmon/analyze.py"]
         task.currentDirectoryURL = URL(fileURLWithPath: "\(NSHomeDirectory())/.netmon")
         try? task.run()
