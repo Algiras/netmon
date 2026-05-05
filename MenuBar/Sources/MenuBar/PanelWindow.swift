@@ -129,7 +129,9 @@ class PanelModel: ObservableObject {
         resolveLog  = ["Starting analysis…"]
         DispatchQueue.global().async {
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/python3")
+            let py = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3")
+                ? "/opt/homebrew/bin/python3" : "/usr/bin/python3"
+            task.executableURL = URL(fileURLWithPath: py)
             task.arguments     = ["\(NSHomeDirectory())/.netmon/analyze.py"]
             task.currentDirectoryURL = URL(fileURLWithPath: "\(NSHomeDirectory())/.netmon")
             let pipe = Pipe()
@@ -189,9 +191,9 @@ struct EventRow: View {
             }
             if let confirm = onConfirm, let reject = onReject {
                 HStack(spacing: 8) {
-                    Button("✓ Confirm", action: confirm)
+                    Button("✓ Confirm  (allow)", action: confirm)
                         .buttonStyle(.borderedProminent).tint(.green)
-                    Button("✗ Reject", action: reject)
+                    Button("✗ Reject  (flag)", action: reject)
                         .buttonStyle(.borderedProminent).tint(.red)
                 }
             } else {
@@ -431,7 +433,7 @@ struct PanelView: View {
                 }
 
                 // LLM model
-                GroupBox("LLM Model  (tool-capable)") {
+                GroupBox("Analysis Model") {
                     Picker("", selection: Binding(
                         get: { model.selectedLLM },
                         set: { model.setLLM($0) }
@@ -449,7 +451,7 @@ struct PanelView: View {
                 }
 
                 // Embedding model
-                GroupBox("Embedding Model  (RAG memory)") {
+                GroupBox("Memory Model") {
                     VStack(alignment: .leading, spacing: 6) {
                         Picker("", selection: Binding(
                             get: { model.selectedEmbed },

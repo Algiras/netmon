@@ -28,6 +28,9 @@ if [ ! -f "$BASELINE" ]; then
   exit 0
 fi
 
+# Ensure baseline is sorted (comm requires sorted input on both sides)
+sort -u "$BASELINE" -o "$BASELINE"
+
 # Find connections present now but not in baseline
 ANOMALIES=$(comm -23 "$CURRENT" "$BASELINE")
 
@@ -43,9 +46,10 @@ if [ -n "$ANOMALIES" ]; then
 
   if [ ${#NOTIF_LINES[@]} -gt 0 ]; then
     # Show up to 3 connections in the notification
-    MSG=$(printf '%s\n' "${NOTIF_LINES[@]}" | head -3 | paste -sd ', ' -)
+    MSG=$(printf '%s\n' "${NOTIF_LINES[@]}" | head -3 | paste -sd ',' - | sed 's/,/, /g')
     [ ${#NOTIF_LINES[@]} -gt 3 ] && MSG="$MSG (+$((${#NOTIF_LINES[@]}-3)) more)"
-    osascript -e "display notification \"$MSG\" with title \"⚠️ New Network Connection\" sound name \"Basso\"" 2>/dev/null
+    SAFE_MSG="${MSG//\"/\'}"
+    osascript -e "display notification \"$SAFE_MSG\" with title \"⚠️ New Network Connection\" sound name \"Basso\"" 2>/dev/null
   fi
 fi
 

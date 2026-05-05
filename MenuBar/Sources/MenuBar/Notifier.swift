@@ -36,7 +36,7 @@ func sendNotification(eventID: String, title: String, body: String, severity: St
 
     let icons: [String: String] = ["info": "ℹ️", "warning": "⚠️", "critical": "🚨"]
     content.title              = "\(icons[severity] ?? "⚠️") \(title)"
-    content.body               = "\(body)  ·  localhost:6543"
+    content.body               = "\(body)  ·  Tap to review in netmon"
     content.categoryIdentifier = CATEGORY_ID
 
     switch severity {

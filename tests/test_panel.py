@@ -24,10 +24,13 @@ def _make_handler(tmp_dir: Path):
     return h
 
 
+_LOCAL_HOST = {"Host": "localhost:6543"}
+
+
 def _post(handler, path: str, body: dict):
     payload = json.dumps(body).encode()
     handler.path    = path
-    handler.headers = {"Content-Length": str(len(payload))}
+    handler.headers = {**_LOCAL_HOST, "Content-Length": str(len(payload))}
     handler.rfile   = io.BytesIO(payload)
     responses = []
     def fake_respond(code, body_str, ct="application/json"):
@@ -38,7 +41,8 @@ def _post(handler, path: str, body: dict):
 
 
 def _get(handler, path: str):
-    handler.path = path
+    handler.path    = path
+    handler.headers = _LOCAL_HOST
     responses = []
     def fake_respond(code, body_str, ct="application/json"):
         responses.append((code, body_str))
@@ -201,6 +205,45 @@ class TestConfigEndpoint(unittest.TestCase):
         resp = _post(h, "/config", {"llm_model": "llama3.2:3b"})
         cfg = json.loads(resp[0][1])
         self.assertEqual(cfg["llm_model"], "llama3.2:3b")
+
+
+class TestHostCheck(unittest.TestCase):
+    """Requests with a non-localhost Host header must be rejected (DNS rebinding defence)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dir = Path(self._tmp.name)
+        patch.object(panel, "CONFIG_FILE", self._dir / "config.json").start()
+        (self._dir / "config.json").write_text('{}')
+        patch.object(db, "DB_PATH", self._dir / "test.db").start()
+        db.init()
+
+    def tearDown(self):
+        patch.stopall()
+        self._tmp.cleanup()
+
+    def _handler(self):
+        return _make_handler(self._dir)
+
+    def test_foreign_host_get_returns_403(self):
+        h = self._handler()
+        h.path    = "/api/config"
+        h.headers = {"Host": "attacker.example.com:6543"}
+        responses = []
+        h._respond = lambda code, body, ct="application/json": responses.append((code, body))
+        h.do_GET()
+        self.assertEqual(responses[0][0], 403)
+
+    def test_foreign_host_post_returns_403(self):
+        payload = json.dumps({"toggle": "autonomous_mode"}).encode()
+        h = self._handler()
+        h.path    = "/config"
+        h.headers = {"Host": "attacker.example.com", "Content-Length": str(len(payload))}
+        h.rfile   = io.BytesIO(payload)
+        responses = []
+        h._respond = lambda code, body, ct="application/json": responses.append((code, body))
+        h.do_POST()
+        self.assertEqual(responses[0][0], 403)
 
 
 class TestGetEndpoints(unittest.TestCase):
