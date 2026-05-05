@@ -1,65 +1,111 @@
-# netmon
-
-**Local network anomaly monitor for macOS** — AI-assisted triage, fully private by default.
-
-netmon watches every outbound connection your Mac makes, compares them against a learned baseline, and flags anything unexpected. A local LLM (running in Ollama) decides whether each new connection is suspicious, routine, or worth adding to the baseline — with no data leaving your machine unless you explicitly switch to the Claude cloud backend.
-
 ---
-
-## What it looks like
-
-![netmon panel — pending event](assets/screenshots/panel-pending.png)
-
-The review panel shows pending alerts with full details and one-click Confirm / Reject buttons. Every decision is stored and used to make future triage smarter.
-
+template: overrides/home.html
+hide:
+  - navigation
+  - toc
 ---
 
 ## How it works
 
 ```
-lsof (every 60 s)
-    └── diff vs baseline.txt
-            └── [ANOMALY] lines → anomalies.log
-                    └── analyze.py (every 5 min)
-                            ├── injection guard
-                            ├── process policy check
-                            ├── RAG lookup (past similar events)
-                            └── Ollama LLM triage
-                                    ├── send_notification  → pending queue
-                                    ├── auto_resolve       → autonomous mode
-                                    └── mark_as_normal     → baseline
+lsof (every 60 s) → diff vs baseline → [ANOMALY] log
+                                              │
+                                        analyze.py (every 5 min)
+                                              │
+                                    ┌─────────┴──────────┐
+                              injection guard       process policy
+                                              │
+                                    Ollama LLM + RAG
+                                              │
+                              ┌───────────────┼──────────────┐
+                        send_notification  auto_resolve  mark_as_normal
+                              │                │               │
+                         pending queue    autonomous       baseline
 ```
 
 ---
 
 ## Key features
 
-| Feature | Detail |
-|---------|--------|
-| **Baseline learning** | Known-safe process×IP pairs are silently skipped |
-| **LLM triage** | Tool-calling LLM classifies each new connection |
-| **RAG memory** | Past decisions retrieved by embedding similarity — no repeat prompting |
-| **Review mode** | You approve or reject each alert via notifications or the panel |
-| **Autonomous mode** | LLM decides autonomously — no human step required |
-| **Process policy** | Per-process expected CIDR ranges; violations skip LLM entirely |
-| **Volume anomaly** | Spike detection on connection counts, even for baselined pairs |
-| **IP blocking** | Reject an event → IP blocked; optional pf firewall enforcement |
-| **Injection guard** | Regex + optional LLM scan before AI triage to detect prompt injection |
-| **MCP server** | Claude Code / Claude Desktop can query and act on events directly |
+<div class="grid cards" markdown>
 
----
+-   :material-shield-check:{ .lg .middle } **Multi-layer detection**
 
-## Everything runs on-device
+    ---
 
-The default setup uses **Ollama** for both the LLM and the embedding model — zero cloud API calls, zero data leaving your Mac. An optional Claude API backend is available for higher-quality analysis; when active, the panel shows a clear warning.
+    Injection guard · process policy · volume anomaly · LLM triage · IP blocking — six independent layers that never all fail at once.
+
+    [:octicons-arrow-right-24: Security overview](security/index.md)
+
+-   :material-brain:{ .lg .middle } **AI-assisted triage**
+
+    ---
+
+    A tool-calling local LLM (Ollama) classifies each new connection with context from a RAG store of past decisions. No repeat prompting.
+
+    [:octicons-arrow-right-24: Models](configuration/models.md)
+
+-   :material-lock:{ .lg .middle } **Private by default**
+
+    ---
+
+    Everything runs on-device with Ollama. No data leaves your Mac unless you explicitly opt into the Claude API backend.
+
+    [:octicons-arrow-right-24: Configuration](configuration/config.md)
+
+-   :material-eye:{ .lg .middle } **Review & Autonomous modes**
+
+    ---
+
+    Choose human-in-the-loop (Review) or fully automated (Autonomous). Switch any time from the menu bar or panel.
+
+    [:octicons-arrow-right-24: Modes](user-guide/modes.md)
+
+-   :material-robot-confused:{ .lg .middle } **AI agent protection**
+
+    ---
+
+    Process policy enforcement catches prompt injection exfiltration from Claude Code, Cursor, Copilot — before the LLM is consulted.
+
+    [:octicons-arrow-right-24: Process Policy](configuration/process-policy.md)
+
+-   :material-api:{ .lg .middle } **MCP integration**
+
+    ---
+
+    Query and act on events from Claude Code or Claude Desktop via a local MCP server — no browser required.
+
+    [:octicons-arrow-right-24: MCP](mcp.md)
+
+</div>
 
 ---
 
 ## Quick start
 
-```bash
-git clone https://github.com/Algiras/netmon ~/.netmon
-bash ~/.netmon/install.sh
-```
+=== "Install"
 
-After about two minutes you'll see `⚡` in your menu bar. Head to [Getting Started](getting-started.md) for the full install walkthrough.
+    ```bash
+    git clone https://github.com/Algiras/netmon ~/.netmon
+    bash ~/.netmon/install.sh
+    ```
+
+=== "Requirements"
+
+    | Requirement | Install |
+    |-------------|---------|
+    | macOS 13+ | — |
+    | [Ollama](https://ollama.com) | `brew install ollama` |
+    | Python 3.10+ | `brew install python` |
+    | Xcode CLT | `xcode-select --install` |
+
+=== "After install"
+
+    ```
+    ⚡  appears in your menu bar
+    http://localhost:6543  panel API
+    ~/.netmon/panel_token  auth token
+    ```
+
+[Get started :octicons-arrow-right-24:](getting-started.md){ .md-button .md-button--primary }
+[API reference :octicons-arrow-right-24:](api-reference.md){ .md-button }

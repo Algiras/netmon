@@ -1,0 +1,60 @@
+/* ── Colour tokens ── */
+:root {
+  --netmon-purple: #7c3aed;
+  --netmon-purple-light: #a78bfa;
+}
+
+/* ── Hero grid cards on home page ── */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid.cards > ol > li {
+  border-radius: 0.5rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid.cards > ol > li:hover {
+  border-color: var(--netmon-purple-light);
+  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.15);
+}
+
+/* ── Code blocks ── */
+.md-typeset .highlight code {
+  font-size: 0.83em;
+}
+
+/* ── Admonition icons ── */
+.md-typeset .admonition.danger,
+.md-typeset details.danger {
+  border-color: #ef4444;
+}
+
+/* ── Inline code ── */
+.md-typeset code:not(.highlight code) {
+  background: var(--md-code-bg-color);
+  border-radius: 0.2rem;
+  padding: 0.05em 0.3em;
+}
+
+/* ── Screenshots ── */
+.md-typeset img[alt*="Panel"],
+.md-typeset img[alt*="panel"],
+.md-typeset img[alt*="Baseline"],
+.md-typeset img[alt*="menu bar"] {
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  margin: 1.5rem auto;
+  display: block;
+}
+
+/* ── Nav active indicator ── */
+.md-nav__link--active {
+  color: var(--netmon-purple-light) !important;
+  font-weight: 600;
+}
+
+/* ── Table header ── */
+.md-typeset table:not([class]) th {
+  background: var(--md-primary-fg-color);
+  color: var(--md-primary-bg-color);
+}

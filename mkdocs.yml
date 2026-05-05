@@ -4,51 +4,87 @@ site_url: https://algiras.github.io/netmon
 repo_url: https://github.com/Algiras/netmon
 repo_name: Algiras/netmon
 edit_uri: edit/main/docs/
+copyright: Released under the MIT License
 
 theme:
   name: material
+  custom_dir: docs/overrides
   palette:
-    scheme: slate
-    primary: deep purple
-    accent: purple
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
   font:
     text: Inter
     code: JetBrains Mono
   logo: assets/logo.svg
   favicon: assets/logo.svg
   features:
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.progress
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.sections
     - navigation.expand
+    - navigation.path
     - navigation.top
     - navigation.footer
+    - navigation.indexes
     - search.suggest
     - search.highlight
+    - search.share
     - content.code.copy
     - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+    - header.autohide
     - toc.follow
+    - announce.dismiss
 
 plugins:
-  - search
+  - search:
+      separator: '[\s\-,:!=\[\]()"/]+|(?!\b)(?=[A-Z][a-z])|\.(?!\d)|&[lg]t;'
 
 markdown_extensions:
   - admonition
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight:
       anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.critic
   - tables
   - attr_list
+  - md_in_html
   - def_list
   - toc:
       permalink: true
+  - abbr
+  - footnotes
 
 nav:
   - Home: index.md
@@ -78,3 +114,18 @@ extra:
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/Algiras/netmon
+  analytics:
+    feedback:
+      title: Was this page helpful?
+      ratings:
+        - icon: material/thumb-up-outline
+          name: This page was helpful
+          data: 1
+          note: Thanks for your feedback!
+        - icon: material/thumb-down-outline
+          name: This page could be improved
+          data: 0
+          note: Thanks for letting us know.
+
+extra_css:
+  - assets/extra.css
