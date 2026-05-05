@@ -21,6 +21,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Run Python tests
+        run: |
+          pip install -q pytest
+          cd $GITHUB_WORKSPACE
+          python3 -m pytest tests/ -q
+
       - name: Generate app icon
         run: |
           pip install -q Pillow
@@ -33,9 +39,10 @@ jobs:
           mkdir -p NetmonMenuBar.app/Contents/Resources
 
           xcrun swiftc -sdk "$SDK" \
-            -framework Foundation -framework AppKit -framework UserNotifications \
+            -framework Foundation -framework AppKit -framework UserNotifications -framework SwiftUI \
             MenuBar/Sources/MenuBar/Notifier.swift \
             MenuBar/Sources/MenuBar/NetmonMenuBar.swift \
+            MenuBar/Sources/MenuBar/PanelWindow.swift \
             MenuBar/Sources/MenuBar/main.swift \
             -o NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar
 
