@@ -9,7 +9,7 @@ SDK="$(xcrun --sdk macosx --show-sdk-path)"
 
 echo "==> Building netmon-menubar (Swift menu bar + notifier)..."
 mkdir -p "$APP/Contents/MacOS"
-xcrun swiftc -sdk "$SDK" \
+xcrun swiftc -O -sdk "$SDK" \
   -framework Foundation -framework AppKit -framework UserNotifications -framework SwiftUI \
   "$NETMON/MenuBar/Sources/MenuBar/Notifier.swift" \
   "$NETMON/MenuBar/Sources/MenuBar/NetmonMenuBar.swift" \
