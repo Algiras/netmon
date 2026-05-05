@@ -12,6 +12,7 @@ config.json
 .analyze_cursor
 .analyze.lock
 .current.tmp
+connection_counts.json
 __pycache__/
 *.pyc
 
