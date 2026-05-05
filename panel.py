@@ -5,13 +5,16 @@ Single-file web server. No external dependencies.
 Reads/writes ~/.netmon/netmon.db via db.py.
 """
 
+import hashlib
 import json
 import os
 import re
 import secrets
 import sys
 import threading
+import time
 import urllib.request
+from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +26,32 @@ import db
 PORT             = 6543
 CONFIG_FILE      = Path.home() / ".netmon" / "config.json"
 PANEL_TOKEN_FILE = Path.home() / ".netmon" / "panel_token"
+
+# ── Rate limiting for /action endpoint ────────────────────────────────────────
+
+_action_timestamps: deque = deque(maxlen=50)
+_ACTION_RATE_LIMIT = 20  # max 20 action requests per 10 seconds
+
+
+def _check_rate_limit() -> bool:
+    now = time.monotonic()
+    while _action_timestamps and now - _action_timestamps[0] > 10.0:
+        _action_timestamps.popleft()
+    if len(_action_timestamps) >= _ACTION_RATE_LIMIT:
+        return False
+    _action_timestamps.append(now)
+    return True
+
+
+# ── Baseline checksum helper ───────────────────────────────────────────────────
+
+def _update_baseline_checksum():
+    baseline_file = Path.home() / ".netmon" / "baseline.txt"
+    checksum_file = Path.home() / ".netmon" / "baseline.sha256"
+    if baseline_file.exists():
+        h = hashlib.sha256(baseline_file.read_bytes()).hexdigest()
+        checksum_file.write_text(h)
+        os.chmod(checksum_file, 0o600)
 
 
 def _load_or_create_token() -> str:
@@ -51,6 +80,7 @@ def read_config() -> dict:
 
 def write_config(data: dict):
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
+    os.chmod(CONFIG_FILE, 0o600)
 
 
 RAG_CASCADE_SIM   = 0.88
@@ -87,8 +117,22 @@ def _write_blocked_meta(bare_ip: str, process: str, remote: str, reason: str):
 
 
 def _do_block_ip(bare_ip: str, process: str, remote: str, reason: str):
-    """Add bare_ip to blocked_ips.txt + metadata. Calls pfctl if pf_enforcement is on."""
+    """Add bare_ip to blocked_ips.txt + metadata. Calls pfctl if pf_enforcement is on.
+    Raises ValueError if the IP is loopback, private, link-local, or unspecified."""
+    import ipaddress as _ipmod
     import subprocess as _sp
+    try:
+        _addr = _ipmod.ip_address(bare_ip)
+    except ValueError:
+        raise ValueError(f"Invalid IP address: {bare_ip!r}")
+    if _addr.is_loopback:
+        raise ValueError(f"Blocking loopback address rejected: {bare_ip!r}")
+    if _addr.is_private:
+        raise ValueError(f"Blocking private/RFC1918 address rejected: {bare_ip!r}")
+    if _addr.is_link_local:
+        raise ValueError(f"Blocking link-local address rejected: {bare_ip!r}")
+    if _addr.is_unspecified:
+        raise ValueError(f"Blocking unspecified address (0.0.0.0) rejected: {bare_ip!r}")
     blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
     existing = set(blocked_file.read_text().splitlines()) if blocked_file.exists() else set()
     if bare_ip not in existing:
@@ -191,14 +235,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def _check_auth(self) -> bool:
+    def _check_host(self) -> bool:
         host = self.headers.get("Host", "")
-        if host not in ("localhost:6543", "127.0.0.1:6543"):
-            return False
+        return host in ("localhost:6543", "127.0.0.1:6543")
+
+    def _check_auth(self) -> bool:
         tok = self.headers.get("X-Netmon-Token", "")
         return secrets.compare_digest(tok, PANEL_TOKEN)
 
     def do_GET(self):
+        if not self._check_host():
+            self._respond(403, '{"error":"forbidden"}', "application/json"); return
         if not self._check_auth():
             self._respond(401, '{"error":"unauthorized"}', "application/json"); return
         if self.path == "/api/events":
@@ -263,6 +310,8 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(404, "not found")
 
     def do_POST(self):
+        if not self._check_host():
+            self._respond(403, '{"error":"forbidden"}', "application/json"); return
         if not self._check_auth():
             self._respond(401, '{"error":"unauthorized"}', "application/json"); return
         length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY)
@@ -312,6 +361,8 @@ class Handler(BaseHTTPRequestHandler):
                 db.clear_embeddings()
             self._respond(200, json.dumps(cfg), "application/json")
         elif self.path == "/action":
+            if not _check_rate_limit():
+                self._respond(429, '{"error":"rate limited"}', "application/json"); return
             body   = raw_body
             action = body.get("action", "")
             if action not in _ALLOWED_ACTIONS:
@@ -343,6 +394,7 @@ class Handler(BaseHTTPRequestHandler):
                     Path.home() / ".netmon" / "baseline.txt",
                     f"{row['process']}|{row['remote']}",
                 )
+                _update_baseline_checksum()
                 # For POLICY_VIOLATION events: also add the specific IP to the process's
                 # expected_cidrs in process_policy.json so it won't fire again.
                 if row["summary"].startswith("[POLICY_VIOLATION]"):
@@ -370,6 +422,7 @@ class Handler(BaseHTTPRequestHandler):
                     Path.home() / ".netmon" / "baseline.txt",
                     f"{row['process']}|{row['remote']}",
                 )
+                _update_baseline_checksum()
                 # Remove IP from blocked list + metadata if it was rejected
                 blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
                 bare_ip = row['remote'].split(":")[0]
@@ -388,6 +441,7 @@ class Handler(BaseHTTPRequestHandler):
             if not entry:
                 self._respond(400, '{"error":"entry required"}', "application/json"); return
             removed = _baseline.remove_entry(Path.home() / ".netmon" / "baseline.txt", entry)
+            _update_baseline_checksum()
             self._respond(200, json.dumps({"removed": removed}), "application/json")
         elif self.path == "/unblock-ip":
             body    = raw_body
@@ -426,6 +480,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     db.init()
+    # Ensure config file has restrictive permissions at startup
+    if CONFIG_FILE.exists():
+        os.chmod(CONFIG_FILE, 0o600)
+    # Ensure panel log file has restrictive permissions
+    panel_log = Path.home() / ".netmon" / "panel.log"
+    if not panel_log.exists():
+        panel_log.touch()
+    os.chmod(panel_log, 0o600)
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     print(f"netmon panel → http://localhost:{PORT}")
     server.serve_forever()

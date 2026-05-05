@@ -10,6 +10,17 @@ MAX_LOG_LINES=5000
 
 mkdir -p "$NETMON_DIR"
 
+# Baseline tamper detection: verify SHA256 checksum before doing anything
+CHECKSUM_FILE="$HOME/.netmon/baseline.sha256"
+if [ -f "$CHECKSUM_FILE" ] && [ -f "$BASELINE" ]; then
+    EXPECTED=$(cat "$CHECKSUM_FILE")
+    ACTUAL=$(shasum -a 256 "$BASELINE" | cut -d' ' -f1)
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [TAMPER_ALERT] baseline.txt checksum mismatch — possible tampering detected" >> "$HOME/.netmon/anomalies.log"
+        osascript -e 'display notification "baseline.txt checksum mismatch — possible tampering" with title "⚡ netmon SECURITY ALERT" sound name "Basso"' 2>/dev/null || true
+    fi
+fi
+
 # Capture ESTABLISHED TCP connections (IPv4 + IPv6): "process|remote_ip:port"
 # Uses NF-1 (second-to-last field) which is always the address in lsof -n -P output
 lsof -i tcp -n -P 2>/dev/null \
@@ -38,8 +49,20 @@ if [ -n "$ANOMALIES" ]; then
   TS=$(date '+%Y-%m-%d %H:%M:%S')
   NOTIF_LINES=()
 
+  # Rate limiting: max 20 anomaly lines per unique process per cycle
+  declare -A _PROC_COUNT
+  declare -A _PROC_CAPPED
+
   while IFS='|' read -r proc remote; do
     [ -z "$proc" ] && continue
+    _PROC_COUNT["$proc"]=$(( ${_PROC_COUNT["$proc"]:-0} + 1 ))
+    if [ "${_PROC_COUNT["$proc"]}" -gt 20 ]; then
+      if [ -z "${_PROC_CAPPED["$proc"]}" ]; then
+        echo "[$TS] [RATE_LIMITED] $proc exceeded 20 anomalies this cycle" | tee -a "$LOG"
+        _PROC_CAPPED["$proc"]=1
+      fi
+      continue
+    fi
     echo "[$TS] [ANOMALY] $proc -> $remote" | tee -a "$LOG"
     NOTIF_LINES+=("$proc → $remote")
   done <<< "$ANOMALIES"

@@ -208,6 +208,20 @@ def clear_embeddings():
         c.execute("UPDATE events SET embedding = ''")
 
 
+def prune_old_events() -> int:
+    """Delete events older than 30 days with status not 'pending', then VACUUM.
+    Returns the count of deleted rows."""
+    with _conn() as c:
+        cur = c.execute(
+            "DELETE FROM events "
+            "WHERE status != 'pending' "
+            "AND ts < datetime('now', '-30 days')"
+        )
+        deleted = cur.rowcount
+        c.execute("VACUUM")
+    return deleted
+
+
 def get_event_embedding(event_id: int) -> list[float] | None:
     """Return the stored embedding for an event, or None if absent."""
     with _conn() as c:

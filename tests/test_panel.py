@@ -27,10 +27,15 @@ def _make_handler(tmp_dir: Path):
 _LOCAL_HOST = {"Host": "localhost:6543"}
 
 
+def _auth_headers(**extra) -> dict:
+    return {**_LOCAL_HOST, "X-Netmon-Token": panel.PANEL_TOKEN, **extra}
+
+
+
 def _post(handler, path: str, body: dict):
     payload = json.dumps(body).encode()
     handler.path    = path
-    handler.headers = {**_LOCAL_HOST, "Content-Length": str(len(payload))}
+    handler.headers = _auth_headers(**{"Content-Length": str(len(payload))})
     handler.rfile   = io.BytesIO(payload)
     responses = []
     def fake_respond(code, body_str, ct="application/json"):
@@ -42,7 +47,7 @@ def _post(handler, path: str, body: dict):
 
 def _get(handler, path: str):
     handler.path    = path
-    handler.headers = _LOCAL_HOST
+    handler.headers = _auth_headers()
     responses = []
     def fake_respond(code, body_str, ct="application/json"):
         responses.append((code, body_str))
@@ -328,7 +333,7 @@ class TestMalformedRequestHandling(unittest.TestCase):
     def _post_raw(self, path: str, raw_bytes: bytes):
         h = self._handler()
         h.path    = path
-        h.headers = {**_LOCAL_HOST, "Content-Length": str(len(raw_bytes))}
+        h.headers = _auth_headers(**{"Content-Length": str(len(raw_bytes))})
         h.rfile   = io.BytesIO(raw_bytes)
         responses = []
         h._respond = lambda code, body, ct="application/json": responses.append((code, body))

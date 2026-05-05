@@ -423,12 +423,17 @@ def kill_process(process_name: str, reason: str, force: bool = False) -> str:
         process_name = _validate_process_name(process_name)
     except ValueError as e:
         return str(e)
-    sig = ["-9"] if force else []
     try:
-        r = subprocess.run(
-            ["killall"] + sig + [process_name],
-            capture_output=True, text=True, timeout=5,
-        )
+        if force:
+            r = subprocess.run(
+                ["pkill", "-9", "-x", process_name],
+                capture_output=True, text=True, timeout=5,
+            )
+        else:
+            r = subprocess.run(
+                ["pkill", "-x", process_name],
+                capture_output=True, text=True, timeout=5,
+            )
         if r.returncode == 0:
             _log(f"[KILL{'(SIGKILL)' if force else ''}] {process_name}: {reason}")
             return f"killed {process_name}"
@@ -674,11 +679,21 @@ def _validate_process_name(name: str) -> str:
 
 
 def _validate_ip(ip: str) -> str:
-    """Raise ValueError for anything that is not a valid IPv4/IPv6 address (port already stripped)."""
+    """Raise ValueError for anything that is not a valid IPv4/IPv6 address (port already stripped).
+    Also rejects loopback, private, link-local, and unspecified addresses."""
     try:
-        return str(ipaddress.ip_address(ip))
+        addr = ipaddress.ip_address(ip)
     except ValueError:
         raise ValueError(f"Unsafe IP rejected: {ip!r}")
+    if addr.is_loopback:
+        raise ValueError(f"Blocking loopback address rejected: {ip!r}")
+    if addr.is_private:
+        raise ValueError(f"Blocking private/RFC1918 address rejected: {ip!r}")
+    if addr.is_link_local:
+        raise ValueError(f"Blocking link-local address rejected: {ip!r}")
+    if addr.is_unspecified:
+        raise ValueError(f"Blocking unspecified address (0.0.0.0) rejected: {ip!r}")
+    return str(addr)
 
 
 # ── Input sanitization ────────────────────────────────────────────────────────
@@ -1331,8 +1346,70 @@ def recheck_autonomous_pending() -> int:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def verify_pf_rules():
+    """Verify that pf rules match the blocked_ips.txt list.
+    Logs a warning and writes [PF_MISMATCH] to anomalies.log if there is a discrepancy."""
+    if not BLOCKED_FILE.exists():
+        return
+    try:
+        blocked_ips = [ip for ip in BLOCKED_FILE.read_text().splitlines() if ip.strip()]
+    except Exception as e:
+        _log(f"[PF_VERIFY/ERROR] Could not read blocked_ips.txt: {e}")
+        return
+    expected_count = len(blocked_ips)
+    try:
+        r = subprocess.run(
+            ["sudo", "pfctl", "-a", "netmon", "-s", "rules"],
+            capture_output=True, text=True, timeout=10,
+        )
+        actual_count = r.stdout.count("block drop")
+    except Exception as e:
+        _log(f"[PF_VERIFY/ERROR] pfctl failed: {e}")
+        return
+    if actual_count != expected_count:
+        msg = (
+            f"[PF_MISMATCH] pf rule count mismatch: "
+            f"blocked_ips.txt has {expected_count} IPs but pfctl shows {actual_count} block drop rules"
+        )
+        _log(f"[PF_VERIFY/WARN] {msg}")
+        try:
+            with ANOMALY_LOG.open("a") as f:
+                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        except Exception:
+            pass
+    else:
+        _log(f"[PF_VERIFY] OK — {actual_count} block drop rule(s) match blocked_ips.txt")
+
+
+def _maybe_prune_db():
+    """Run prune_old_events() at most once per day, using a timestamp file."""
+    vacuum_file = NETMON_DIR / "last_vacuum"
+    run_prune = True
+    if vacuum_file.exists():
+        try:
+            mtime = vacuum_file.stat().st_mtime
+            if (datetime.now().timestamp() - mtime) < 86400:
+                run_prune = False
+        except Exception:
+            pass
+    if run_prune:
+        try:
+            deleted = db.prune_old_events()
+            _log(f"[PRUNE] Deleted {deleted} old event(s) and ran VACUUM")
+            vacuum_file.write_text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        except Exception as e:
+            _log(f"[PRUNE/ERROR] {e}")
+
+
 def main():
     db.init()
+
+    # Prune old events once per day
+    _maybe_prune_db()
+
+    # Verify pf rules match blocked_ips.txt when enforcement is active
+    if read_config().get("pf_enforcement", False):
+        verify_pf_rules()
 
     # Always sweep stale pending events with RAG — runs even when no new log lines
     if ensure_models():

@@ -192,6 +192,53 @@ EOF
 echo "  ✓ $AGENTS/com.user.netmon.menubar.plist"
 
 echo ""
+echo "==> Writing watchdog script..."
+cat > "$NETMON/watchdog.sh" << 'WATCHDOG_EOF'
+#!/usr/bin/env bash
+# watchdog.sh — alert if netmon processes are not running
+NETMON="$HOME/.netmon"
+
+check_process() {
+    local name="$1"
+    local label="$2"
+    if ! pgrep -f "$name" > /dev/null 2>&1; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WATCHDOG] $label is not running" >> "$NETMON/watchdog.log"
+        osascript -e "display notification \"$label has stopped — network monitoring may be inactive\" with title \"⚡ netmon WARNING\" sound name \"Basso\"" 2>/dev/null || true
+    fi
+}
+
+check_process "monitor.sh" "monitor"
+check_process "panel.py" "panel server"
+WATCHDOG_EOF
+chmod +x "$NETMON/watchdog.sh"
+echo "  ✓ $NETMON/watchdog.sh"
+
+cat > "$AGENTS/com.user.netmon.watchdog.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.netmon.watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${NETMON}/watchdog.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${NETMON}/watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>${NETMON}/watchdog.err</string>
+</dict>
+</plist>
+EOF
+echo "  ✓ $AGENTS/com.user.netmon.watchdog.plist"
+
+echo ""
 echo "==> Setting menu bar visibility..."
 defaults write com.apple.controlcenter "NSStatusItem Visible netmon" -bool true
 
