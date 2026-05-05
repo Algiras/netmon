@@ -17,7 +17,7 @@ if [[ "$PY_VER" -ge 310 ]]; then ok "$PY_DISP"; else fail "Need Python 3.10+, go
 
 # 2. Python syntax check on all .py files
 for f in "$NETMON"/*.py; do
-    "$PY" -m py_compile "$f" 2>/dev/null && ok "syntax: $(basename $f)" || fail "syntax error: $f"
+    "$PY" -m py_compile "$f" 2>/dev/null && ok "syntax: $(basename "$f")" || fail "syntax error: $f"
 done
 
 # 3. Module imports work
@@ -25,8 +25,9 @@ done
     && ok "all modules import cleanly" || fail "module import failed"
 
 # 4. Unit tests
-"$PY" -m pytest "$NETMON/tests/" -q --tb=no 2>&1 | tail -1 | grep -q "passed" \
-    && ok "unit tests: $("$PY" -m pytest "$NETMON/tests/" -q --tb=no 2>/dev/null | tail -1)" \
+_pt=$("$PY" -m pytest "$NETMON/tests/" -q --tb=no 2>&1 | tail -1)
+echo "$_pt" | grep -q "passed" \
+    && ok "unit tests: $_pt" \
     || fail "unit tests failed — run: python3 -m pytest $NETMON/tests/ -v"
 
 # 5. Panel server responding
@@ -43,7 +44,6 @@ for label in com.user.netmon com.user.netmon.analyze com.user.netmon.panel com.u
         fail "LaunchAgent not loaded: $label"
     else
         pid=$(echo "$info" | grep '"PID"' | grep -o '[0-9]*' || true)
-        scheduled=$(echo "$info" | grep -q 'StartInterval' && echo yes || true)
         on_demand=$(echo "$info" | grep -q '"OnDemand" = true' && echo yes || true)
         if [[ -n "$pid" ]]; then
             ok "LaunchAgent $label (pid $pid)"

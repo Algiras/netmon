@@ -8,6 +8,7 @@ granite4.1:3b reviews network anomaly threads with RAG short-term memory.
 - Stores every event + embedding in the DB for the panel UI
 """
 
+import ipaddress
 import json
 import logging
 import logging.handlers
@@ -237,11 +238,13 @@ def send_notification(process, remote, title, message, severity) -> str:
         )
     else:
         sounds  = {"info": "Glass", "warning": "Basso", "critical": "Sosumi"}
-        heading = f"{icons.get(severity,'⚠️')} {title}"
+        # Strip double-quotes to prevent AppleScript injection
+        safe_msg     = message.replace('"', "'")
+        safe_heading = f"{icons.get(severity,'⚠️')} {title}".replace('"', "'")
         subprocess.Popen(
             ["osascript", "-e",
-             f'display notification "{message}  → {PANEL_URL}" '
-             f'with title "{heading}" sound name "{sounds.get(severity,"Basso")}"'],
+             f'display notification "{safe_msg}" '
+             f'with title "{safe_heading}" sound name "{sounds.get(severity,"Basso")}"'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
@@ -273,17 +276,21 @@ def auto_resolve(process, remote, decision, reason) -> str:
 def mark_as_normal(process, remote, reason="") -> str:
     baseline = NETMON_DIR / "baseline.txt"
     entry = f"{process}|{remote}"
-    if baseline.exists():
-        existing = set(baseline.read_text().splitlines())
-        if entry in existing:
-            return "already in baseline"
-        with baseline.open("a") as f:
-            f.write(entry + "\n")
+    existing = set(baseline.read_text().splitlines()) if baseline.exists() else set()
+    if entry in existing:
+        return "already in baseline"
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    # Always write sorted — monitor.sh uses `comm` which requires sorted input on both sides
+    baseline.write_text("\n".join(sorted(existing | {entry})) + "\n")
     _log(f"[BASELINE+] {entry}  reason={reason!r}")
     return "added to baseline"
 
 
 def get_process_info(process_name: str) -> str:
+    try:
+        process_name = _validate_process_name(process_name)
+    except ValueError as e:
+        return str(e)
     lines = []
     # Network connections via lsof
     try:
@@ -316,6 +323,10 @@ def get_process_info(process_name: str) -> str:
 
 
 def kill_process(process_name: str, reason: str, force: bool = False) -> str:
+    try:
+        process_name = _validate_process_name(process_name)
+    except ValueError as e:
+        return str(e)
     sig = ["-9"] if force else []
     try:
         r = subprocess.run(
@@ -335,8 +346,11 @@ def kill_process(process_name: str, reason: str, force: bool = False) -> str:
 
 
 def block_ip(ip: str, reason: str) -> str:
-    # Strip port if accidentally included
     bare_ip = ip.split(":")[0]
+    try:
+        bare_ip = _validate_ip(bare_ip)
+    except ValueError as e:
+        return str(e)
 
     existing = set(BLOCKED_FILE.read_text().splitlines()) if BLOCKED_FILE.exists() else set()
     if bare_ip not in existing:
@@ -400,6 +414,27 @@ def dispatch(name: str, args: dict) -> str:
             reason = args.get("reason", ""),
         )
     return f"unknown tool: {name}"
+
+
+# ── Subprocess argument validators ───────────────────────────────────────────
+
+_PROC_RE = re.compile(r"^[\w][\w\s.\-]{0,62}$")
+
+
+def _validate_process_name(name: str) -> str:
+    """Raise ValueError for process names that could be flag-injected into lsof/killall."""
+    stripped = name.strip()
+    if not _PROC_RE.fullmatch(stripped):
+        raise ValueError(f"Unsafe process_name rejected: {name!r}")
+    return stripped
+
+
+def _validate_ip(ip: str) -> str:
+    """Raise ValueError for anything that is not a valid IPv4/IPv6 address (port already stripped)."""
+    try:
+        return str(ipaddress.ip_address(ip))
+    except ValueError:
+        raise ValueError(f"Unsafe IP rejected: {ip!r}")
 
 
 # ── Input sanitization ────────────────────────────────────────────────────────
@@ -497,6 +532,10 @@ def run_with_tools(messages: list) -> str:
         for call in tool_calls:
             fn     = call.get("function", {})
             result = dispatch(fn.get("name", ""), fn.get("arguments", {}))
+            # Tool results from get_process_info contain raw lsof/ps output —
+            # sanitize before feeding back to the LLM to block second-order injection.
+            if fn.get("name") == "get_process_info" and check_injection(str(result)):
+                result = "[BLOCKED] Tool result contained suspected injection payload"
             messages.append({"role": "tool", "name": fn.get("name"), "content": result})
 
     return ""
@@ -541,6 +580,10 @@ def load_new_anomalies() -> list[str]:
             cursor = int(CURSOR_FILE.read_text().strip())
         except ValueError:
             pass
+    # Detect log rotation: if cursor > file length, the log was trimmed.
+    # Re-process the last 100 lines to avoid missing events near the rotation boundary.
+    if cursor > len(all_lines):
+        cursor = max(0, len(all_lines) - 100)
     new = all_lines[cursor:]
     CURSOR_FILE.write_text(str(len(all_lines)))
     return new

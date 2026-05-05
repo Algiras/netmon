@@ -7,6 +7,7 @@ Reads/writes ~/.netmon/netmon.db via db.py.
 
 import json
 import os
+import re
 import sys
 import threading
 import urllib.request
@@ -100,6 +101,12 @@ def list_ollama_models() -> dict:
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
 
+_ALLOWED_ACTIONS     = {"confirmed", "rejected", "revert", "pending"}
+_ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model"}
+_MODEL_RE            = re.compile(r"^[\w][\w.\-:/]{0,100}$")
+MAX_BODY             = 65_536  # 64 KB — enough for any legitimate panel request
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # silence access log
@@ -112,7 +119,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _check_host(self) -> bool:
+        host = self.headers.get("Host", "")
+        return host in ("localhost:6543", "127.0.0.1:6543")
+
     def do_GET(self):
+        if not self._check_host():
+            self._respond(403, '{"error":"forbidden"}', "application/json"); return
         if self.path == "/api/events":
             db.init()
             cfg  = read_config()
@@ -131,8 +144,10 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(404, "not found")
 
     def do_POST(self):
+        if not self._check_host():
+            self._respond(403, '{"error":"forbidden"}', "application/json"); return
+        length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY)
         if self.path == "/config":
-            length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
             cfg    = read_config()
             clear_emb = body.pop("_clear_embeddings", False)
@@ -147,36 +162,45 @@ class Handler(BaseHTTPRequestHandler):
                         return
                 cfg[key] = not cfg.get(key, False)
             else:
-                cfg.update(body)
+                # Allowlist keys and validate model name format
+                for k, v in body.items():
+                    if k not in _ALLOWED_CONFIG_KEYS:
+                        continue
+                    if k in ("llm_model", "embed_model") and not _MODEL_RE.fullmatch(str(v)):
+                        continue
+                    cfg[k] = v
             write_config(cfg)
             if clear_emb:
                 db.init()
                 db.clear_embeddings()
             self._respond(200, json.dumps(cfg), "application/json")
         elif self.path == "/action":
-            length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
-            action = body["action"]
+            action = body.get("action", "")
+            if action not in _ALLOWED_ACTIONS:
+                self._respond(400, '{"error":"invalid action"}', "application/json"); return
 
             with db._conn() as c:
                 row = c.execute(
                     "SELECT process,remote,status FROM events WHERE id=?", (body["id"],)
                 ).fetchone()
 
+            if row is None:
+                self._respond(404, '{"error":"event not found"}', "application/json"); return
+
             if action != "revert":
                 db.update_status(int(body["id"]), action)
                 if action in ("confirmed", "rejected"):
                     _cascade_decision(int(body["id"]), action)
 
-            # If confirmed, add to baseline
+            # If confirmed, add to baseline (sorted — comm requires sorted input)
             if action == "confirmed" and row:
                 baseline = Path.home() / ".netmon" / "baseline.txt"
-                entry = f"{row['process']}|{row['remote']}"
-                if baseline.exists():
-                    existing = set(baseline.read_text().splitlines())
-                    if entry not in existing:
-                        with baseline.open("a") as f:
-                            f.write(entry + "\n")
+                entry    = f"{row['process']}|{row['remote']}"
+                existing = set(baseline.read_text().splitlines()) if baseline.exists() else set()
+                if entry not in existing:
+                    baseline.parent.mkdir(parents=True, exist_ok=True)
+                    baseline.write_text("\n".join(sorted(existing | {entry})) + "\n")
 
             # Revert: reset to pending, undo baseline/block side-effects
             if action == "revert" and row:

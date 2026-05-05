@@ -35,8 +35,8 @@ if [ -f "$BINARY" ]; then
         "$HOME/Library/LaunchAgents/com.user.netmon.panel.plist" \
         "$HOME/Library/LaunchAgents/com.user.netmon.menubar.plist"
     do
-        launchctl unload "$plist" 2>/dev/null || true
-        launchctl load   "$plist"
+        launchctl bootout  "gui/$(id -u)" "$plist" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$plist"
         echo "  ✓ $(basename "$plist")"
     done
     echo ""
