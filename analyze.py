@@ -501,6 +501,7 @@ def _log(msg: str):
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line)
+    ANALYSIS_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(ANALYSIS_LOG, "a") as f:
         f.write(line + "\n")
 
