@@ -75,6 +75,7 @@ class TestActionEndpoint(unittest.TestCase):
     def test_confirm_adds_to_baseline(self):
         # Use real home dir baseline; just verify status + baseline entry
         netmon_dir = Path.home() / ".netmon"
+        netmon_dir.mkdir(parents=True, exist_ok=True)
         baseline   = netmon_dir / "baseline.txt"
         original   = baseline.read_text() if baseline.exists() else None
         entry      = "bash_test_entry|254.254.254.254:9999"
@@ -112,6 +113,7 @@ class TestActionEndpoint(unittest.TestCase):
     def test_revert_removes_from_baseline(self):
         # Test the baseline-removal logic directly (Path.home() is hard to mock inside panel)
         netmon_dir = Path.home() / ".netmon"
+        netmon_dir.mkdir(parents=True, exist_ok=True)
         baseline   = netmon_dir / "baseline.txt"
         entry      = "revert_test|254.253.252.251:9999"
 
@@ -173,8 +175,9 @@ class TestConfigEndpoint(unittest.TestCase):
         return _make_handler(self._dir)
 
     def test_toggle_autonomous_mode(self):
-        h = self._handler()
-        resp = _post(h, "/config", {"toggle": "autonomous_mode"})
+        with patch("panel._ollama_available", return_value=True):
+            h = self._handler()
+            resp = _post(h, "/config", {"toggle": "autonomous_mode"})
         self.assertEqual(resp[0][0], 200)
         cfg = json.loads(resp[0][1])
         self.assertTrue(cfg["autonomous_mode"])
