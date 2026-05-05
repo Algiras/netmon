@@ -84,6 +84,26 @@ def _do_block_ip(bare_ip: str, process: str, remote: str, reason: str):
             pass
 
 
+def _add_ip_to_process_policy(process: str, remote: str):
+    """Add the specific IP from remote (ip:port) to the process's expected_cidrs in process_policy.json."""
+    import ipaddress as _ipmod
+    policy_file = Path.home() / ".netmon" / "process_policy.json"
+    try:
+        policy = json.loads(policy_file.read_text()) if policy_file.exists() else {}
+    except Exception:
+        return
+    bare_ip = remote.split(":")[0].strip("[]")
+    try:
+        addr = _ipmod.ip_address(bare_ip)
+        host_cidr = f"{addr}/32" if addr.version == 4 else f"{addr}/128"
+    except ValueError:
+        return
+    entry = policy.setdefault(process, {"label": process, "expected_cidrs": []})
+    if host_cidr not in entry.get("expected_cidrs", []):
+        entry.setdefault("expected_cidrs", []).append(host_cidr)
+        policy_file.write_text(json.dumps(policy, indent=2))
+
+
 def _cascade_decision(event_id: int, decision: str) -> int:
     """After a manual confirm/reject, auto-resolve similar pending events in one transaction."""
     return db.cascade_decision(event_id, decision, RAG_CASCADE_SIM)
@@ -284,7 +304,7 @@ class Handler(BaseHTTPRequestHandler):
 
             with db._conn() as c:
                 row = c.execute(
-                    "SELECT process,remote,status FROM events WHERE id=?", (event_id,)
+                    "SELECT process,remote,status,summary FROM events WHERE id=?", (event_id,)
                 ).fetchone()
 
             if row is None:
@@ -301,6 +321,10 @@ class Handler(BaseHTTPRequestHandler):
                     Path.home() / ".netmon" / "baseline.txt",
                     f"{row['process']}|{row['remote']}",
                 )
+                # For POLICY_VIOLATION events: also add the specific IP to the process's
+                # expected_cidrs in process_policy.json so it won't fire again.
+                if row["summary"].startswith("[POLICY_VIOLATION]"):
+                    _add_ip_to_process_policy(row["process"], row["remote"])
 
             # If rejected with block_ip_also=true, also block the IP
             if action == "rejected" and body.get("block_ip_also") and row:

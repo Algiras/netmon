@@ -1222,9 +1222,13 @@ def sweep_pending_events() -> int:
     """Auto-resolve pending DB events that are highly similar to already-decided events."""
     with db._conn() as c:
         rows = c.execute(
-            "SELECT id, process, remote FROM events "
+            "SELECT id, process, remote, summary FROM events "
             "WHERE status='pending' AND embedding != ''"
         ).fetchall()
+    # BLOCKED and POLICY_VIOLATION events must go to manual review — never auto-sweep
+    rows = [r for r in rows if not (
+        r["summary"].startswith("[BLOCKED]") or r["summary"].startswith("[POLICY_VIOLATION]")
+    )]
 
     resolved = 0
     for row in rows:
@@ -1278,8 +1282,11 @@ def recheck_autonomous_pending() -> int:
 
     submitted = 0
     for proc, events in groups.items():
-        # BLOCKED events need manual review — skip so they don't loop forever
-        events = [ev for ev in events if not ev.get("summary", "").startswith("[BLOCKED]")]
+        # BLOCKED and POLICY_VIOLATION events need manual review — skip so they don't loop forever
+        events = [ev for ev in events if not (
+            ev.get("summary", "").startswith("[BLOCKED]") or
+            ev.get("summary", "").startswith("[POLICY_VIOLATION]")
+        )]
         if not events:
             continue
         fake_lines = [
@@ -1368,13 +1375,22 @@ def main():
 
         for remote, msg in violation_events:
             _log(f"[POLICY_VIOLATION] proc='{proc}' remote='{remote}': {msg}")
-            send_notification(
+            summary_text = f"[POLICY_VIOLATION] {msg}"
+            vector   = emb.embed_event(proc, remote, msg)
+            event_id = db.insert_event(
                 process=proc[:64], remote=remote,
-                title=f"Policy violation: {proc}",
-                message=msg,
                 severity="critical",
-                recommended_action="reject",
+                summary=summary_text,
+                embedding=vector,
             )
+            notif_body = msg[:200]
+            if MENUBAR_BIN.exists():
+                subprocess.Popen(
+                    [str(MENUBAR_BIN), "notify", str(event_id),
+                     f"Policy violation: {proc}", notif_body, "critical", "reject"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            _log(f"[NOTIFY/CRITICAL] {summary_text}")
 
         lines = clean_lines
         if not lines:
