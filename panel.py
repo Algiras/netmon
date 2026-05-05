@@ -32,6 +32,16 @@ def write_config(data: dict):
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
 
+def _ollama_available() -> bool:
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request("http://localhost:11434/api/tags"), timeout=3
+        )
+        return True
+    except Exception:
+        return False
+
+
 def list_ollama_models() -> dict:
     """Return installed Ollama models split into llm (tools) and embed categories."""
     try:
@@ -39,7 +49,7 @@ def list_ollama_models() -> dict:
         with urllib.request.urlopen(req, timeout=5) as r:
             tags = json.loads(r.read())
     except Exception:
-        return {"llm": [], "embed": []}
+        return {"available": False, "llm": [], "embed": []}
 
     llm, embed = [], []
     for m in tags.get("models", []):
@@ -62,7 +72,7 @@ def list_ollama_models() -> dict:
             llm.append(entry)
         elif "embedding" in caps:
             embed.append(entry)
-    return {"llm": llm, "embed": embed}
+    return {"available": True, "llm": llm, "embed": embed}
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
 
@@ -103,7 +113,14 @@ class Handler(BaseHTTPRequestHandler):
             cfg    = read_config()
             clear_emb = body.pop("_clear_embeddings", False)
             if "toggle" in body:
-                key      = body["toggle"]
+                key = body["toggle"]
+                # Block enabling autonomous mode when Ollama is unreachable
+                if key == "autonomous_mode" and not cfg.get("autonomous_mode", False):
+                    if not _ollama_available():
+                        self._respond(409,
+                            json.dumps({"error": "Ollama not available — cannot enable autonomous mode"}),
+                            "application/json")
+                        return
                 cfg[key] = not cfg.get(key, False)
             else:
                 cfg.update(body)

@@ -29,6 +29,7 @@ CONFIG_FILE   = NETMON_DIR / "config.json"
 PANEL_URL     = "http://localhost:6543"
 MENUBAR_BIN   = Path("/Applications/NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar")
 BLOCKED_FILE  = NETMON_DIR / "blocked_ips.txt"
+OLLAMA_BASE   = "http://localhost:11434"
 
 
 def read_config() -> dict:
@@ -36,6 +37,57 @@ def read_config() -> dict:
         return json.loads(CONFIG_FILE.read_text())
     except Exception:
         return {"autonomous_mode": False}
+
+
+# ── Ollama availability + model management ────────────────────────────────────
+
+def ollama_status() -> dict:
+    """{'available': bool, 'models': [str]}"""
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(f"{OLLAMA_BASE}/api/tags"), timeout=5
+        ) as r:
+            tags = json.loads(r.read())
+        return {"available": True, "models": [m["name"] for m in tags.get("models", [])]}
+    except Exception:
+        return {"available": False, "models": []}
+
+
+def ensure_models() -> bool:
+    """
+    Check Ollama is running and pull the configured LLM + embed models if missing.
+    Returns True when both models are ready; False if Ollama is unreachable or pull fails.
+    """
+    cfg   = read_config()
+    needs = [
+        cfg.get("llm_model",   "granite4.1:3b"),
+        cfg.get("embed_model", "nomic-embed-text-v2-moe"),
+    ]
+
+    status = ollama_status()
+    if not status["available"]:
+        _log("[SETUP] Ollama not running — analysis skipped (manual review mode active)")
+        return False
+
+    installed_bases = {m.split(":")[0] for m in status["models"]}
+    for model in needs:
+        base = model.split(":")[0]
+        if base not in installed_bases:
+            _log(f"[SETUP] Model '{model}' not found — pulling (this may take a few minutes)…")
+            try:
+                result = subprocess.run(
+                    ["ollama", "pull", model],
+                    timeout=600, capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    _log(f"[SETUP/ERROR] Pull failed for '{model}': {result.stderr[:200]}")
+                    return False
+                _log(f"[SETUP] Pulled '{model}' successfully")
+            except Exception as e:
+                _log(f"[SETUP/ERROR] Could not pull '{model}': {e}")
+                return False
+
+    return True
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
@@ -582,6 +634,9 @@ def main():
     if not new_lines:
         _log("[ANALYZE] No new anomalies — skipping")
         return
+
+    if not ensure_models():
+        return  # logged inside ensure_models
 
     cfg      = read_config()
     auto     = cfg.get("autonomous_mode", False)

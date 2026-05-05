@@ -9,9 +9,10 @@ struct ModelEntry: Decodable, Hashable {
 }
 
 struct OllamaModels: Decodable {
-    let llm:   [ModelEntry]
-    let embed: [ModelEntry]
-    let config: NetmonConfig?
+    let available: Bool
+    let llm:       [ModelEntry]
+    let embed:     [ModelEntry]
+    let config:    NetmonConfig?
 }
 
 // ── View-model ────────────────────────────────────────────────────────────────
@@ -25,8 +26,11 @@ class PanelModel: ObservableObject {
     @Published var embedModels:   [ModelEntry] = []
     @Published var selectedLLM    = ""
     @Published var selectedEmbed  = ""
-    @Published var isResolving    = false
-    @Published var resolveLog:    [String] = []
+    @Published var ollamaAvailable = true
+    @Published var isResolving     = false
+    @Published var resolveLog:     [String] = []
+    @Published var isPulling       = false
+    @Published var pullLog:        [String] = []
 
     func refresh() {
         fetchEvents { [weak self] r in
@@ -42,8 +46,9 @@ class PanelModel: ObservableObject {
             guard let self, let data,
                   let m = try? JSONDecoder().decode(OllamaModels.self, from: data) else { return }
             DispatchQueue.main.async {
-                self.llmModels   = m.llm
-                self.embedModels = m.embed
+                self.ollamaAvailable = m.available
+                self.llmModels       = m.llm
+                self.embedModels     = m.embed
                 if self.selectedLLM.isEmpty,   let first = m.llm.first   { self.selectedLLM   = first.name }
                 if self.selectedEmbed.isEmpty, let first = m.embed.first  { self.selectedEmbed = first.name }
             }
@@ -63,8 +68,49 @@ class PanelModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
     }
     func toggleMode() {
+        // Turning autonomous ON requires Ollama — panel.py enforces this server-side too
+        if !autonomousMode && !ollamaAvailable { return }
         toggleAutonomousMode()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
+    }
+
+    func pullModels() {
+        guard !isPulling else { return }
+        isPulling = true
+        pullLog   = ["Pulling models via Ollama…"]
+        let cfg   = (try? JSONDecoder().decode(NetmonConfig.self,
+                      from: (try? Data(contentsOf: URL(fileURLWithPath:
+                        NSHomeDirectory() + "/.netmon/config.json"))) ?? Data()))
+        let llm   = cfg?.llm_model   ?? "granite4.1:3b"
+        let emb   = cfg?.embed_model ?? "nomic-embed-text-v2-moe"
+        DispatchQueue.global().async {
+            for model in [llm, emb] {
+                DispatchQueue.main.async { self.pullLog.append("→ ollama pull \(model)") }
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
+                task.arguments     = ["pull", model]
+                let pipe = Pipe()
+                task.standardOutput = pipe; task.standardError = pipe
+                try? task.run()
+                pipe.fileHandleForReading.readabilityHandler = { fh in
+                    if let s = String(data: fh.availableData, encoding: .utf8),
+                       !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        DispatchQueue.main.async { self.pullLog.append(s.trimmingCharacters(in: .newlines)) }
+                    }
+                }
+                task.waitUntilExit()
+                pipe.fileHandleForReading.readabilityHandler = nil
+                let ok = task.terminationStatus == 0
+                DispatchQueue.main.async {
+                    self.pullLog.append(ok ? "✓ \(model) ready" : "✗ failed to pull \(model)")
+                }
+            }
+            DispatchQueue.main.async {
+                self.isPulling = false
+                self.pullLog.append("✓ Done. Refreshing…")
+                self.refresh()
+            }
+        }
     }
 
     func setLLM(_ name: String) {
@@ -275,6 +321,67 @@ struct PanelView: View {
     private var settingsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // Ollama status banner
+                if !model.ollamaAvailable {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Ollama not running").fontWeight(.semibold)
+                            Text("Start Ollama to enable LLM analysis and autonomous mode.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Start") {
+                            let t = Process()
+                            t.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
+                            t.arguments = ["serve"]
+                            try? t.run()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { model.refresh() }
+                        }
+                        .buttonStyle(.borderedProminent).tint(.orange)
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(8)
+                } else if model.llmModels.isEmpty || model.embedModels.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .foregroundStyle(.blue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Models not downloaded").fontWeight(.semibold)
+                            Text("LLM and embedding models are required for analysis.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(action: { model.pullModels() }) {
+                            HStack(spacing: 4) {
+                                if model.isPulling { ProgressView().scaleEffect(0.7) }
+                                Text(model.isPulling ? "Downloading…" : "Download")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isPulling)
+                    }
+                    .padding(10)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                    if !model.pullLog.isEmpty {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(model.pullLog, id: \.self) { line in
+                                    Text(line).font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                        }
+                        .frame(height: 80)
+                        .background(Color(NSColor.textBackgroundColor))
+                        .cornerRadius(6)
+                    }
+                }
+
                 // Autonomous mode
                 GroupBox("Mode") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -282,10 +389,15 @@ struct PanelView: View {
                             get: { model.autonomousMode },
                             set: { _ in model.toggleMode() }
                         ))
-                        Text(model.autonomousMode
-                             ? "LLM auto-resolves events without human review."
-                             : "LLM flags events for your approval.")
-                            .font(.caption).foregroundStyle(.secondary)
+                        .disabled(!model.ollamaAvailable)
+                        Text(
+                            !model.ollamaAvailable
+                                ? "Ollama required — manual review only."
+                                : model.autonomousMode
+                                    ? "LLM auto-resolves events without human review."
+                                    : "LLM flags events for your approval."
+                        )
+                        .font(.caption).foregroundStyle(.secondary)
 
                         Divider()
 
