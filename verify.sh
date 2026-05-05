@@ -122,8 +122,30 @@ else
     fail "IP validation issue: $_ip_check"
 fi
 
-# 12. LaunchAgents loaded
-for label in com.user.netmon com.user.netmon.analyze com.user.netmon.panel com.user.netmon.menubar; do
+# 12. Sudoers file present and covers tcpdump + pfctl
+SUDOERS_FILE="/etc/sudoers.d/netmon"
+if [[ -f "$SUDOERS_FILE" ]]; then
+    perms=$(stat -f "%OLp" "$SUDOERS_FILE" 2>/dev/null || stat -c "%a" "$SUDOERS_FILE" 2>/dev/null)
+    if [[ "$perms" == "440" || "$perms" == "400" ]]; then
+        ok "sudoers file present (mode $perms): $SUDOERS_FILE"
+    else
+        fail "sudoers file has wrong permissions ($perms, want 440): $SUDOERS_FILE"
+    fi
+    if grep -q "tcpdump" "$SUDOERS_FILE" 2>/dev/null; then
+        ok "sudoers covers tcpdump (DNS monitor)"
+    else
+        fail "sudoers missing tcpdump entry — DNS monitor will fail to start"
+    fi
+else
+    fail "sudoers not configured: $SUDOERS_FILE missing — run install.sh or see docs/security/dns-exfil.md"
+fi
+
+# 13. dns_monitor syntax and import
+"$PY" -m py_compile "$NETMON/dns_monitor.py" 2>/dev/null \
+    && ok "syntax: dns_monitor.py" || fail "syntax error: dns_monitor.py"
+
+# 14. LaunchAgents loaded
+for label in com.user.netmon com.user.netmon.analyze com.user.netmon.panel com.user.netmon.menubar com.user.netmon.dns; do
     info=$(launchctl list "$label" 2>/dev/null || true)
     if [[ -z "$info" ]]; then
         fail "LaunchAgent not loaded: $label"
@@ -140,15 +162,15 @@ for label in com.user.netmon com.user.netmon.analyze com.user.netmon.panel com.u
     fi
 done
 
-# 13. Binary installed
+# 15. Binary installed
 BIN=/Applications/NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar
 [[ -x "$BIN" ]] && ok "binary: $BIN" || fail "binary missing: $BIN"
 
-# 14. Ollama reachable
+# 16. Ollama reachable
 curl -sf --max-time 3 http://localhost:11434/api/tags > /dev/null 2>&1 \
     && ok "Ollama running" || fail "Ollama not running (brew services start ollama)"
 
-# 15. pf status (informational — not a hard failure)
+# 17. pf status (informational — not a hard failure)
 if sudo pfctl -s tables 2>/dev/null | grep -q "netmon_blocked"; then
     count=$(sudo pfctl -t netmon_blocked -T show 2>/dev/null | wc -l | tr -d ' ')
     ok "pf anchor netmon_blocked active ($count entries)"

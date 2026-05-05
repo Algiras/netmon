@@ -239,6 +239,60 @@ EOF
 echo "  ✓ $AGENTS/com.user.netmon.watchdog.plist"
 
 echo ""
+echo "==> Writing sudoers rules for pfctl + tcpdump..."
+PFCTL_BIN=$(command -v pfctl 2>/dev/null || echo "/sbin/pfctl")
+TCPDUMP_BIN=$(command -v tcpdump 2>/dev/null || echo "/usr/sbin/tcpdump")
+CURRENT_USER=$(whoami)
+SUDOERS_FILE="/etc/sudoers.d/netmon"
+TMP_SUDOERS=$(mktemp)
+cat > "$TMP_SUDOERS" << SUDOERS_CONTENT
+# netmon — least-privilege sudo rules for pfctl (IP blocking) and tcpdump (DNS monitor)
+${CURRENT_USER} ALL=(root) NOPASSWD: ${PFCTL_BIN} -t netmon_blocked -T add *
+${CURRENT_USER} ALL=(root) NOPASSWD: ${PFCTL_BIN} -t netmon_blocked -T delete *
+${CURRENT_USER} ALL=(root) NOPASSWD: ${PFCTL_BIN} -t netmon_blocked -T show
+${CURRENT_USER} ALL=(root) NOPASSWD: ${PFCTL_BIN} -a netmon -s rules
+${CURRENT_USER} ALL=(root) NOPASSWD: ${PFCTL_BIN} -s tables
+${CURRENT_USER} ALL=(root) NOPASSWD: ${TCPDUMP_BIN} -l -n udp port 53
+SUDOERS_CONTENT
+if sudo visudo -c -f "$TMP_SUDOERS" 2>/dev/null; then
+    sudo cp "$TMP_SUDOERS" "$SUDOERS_FILE"
+    sudo chmod 440 "$SUDOERS_FILE"
+    echo "  ✓ $SUDOERS_FILE"
+else
+    echo "  ✗ sudoers syntax check failed — skipping (IP blocking + DNS monitor require manual sudo)"
+fi
+rm -f "$TMP_SUDOERS"
+
+echo ""
+echo "==> Writing DNS monitor LaunchAgent..."
+cat > "$AGENTS/com.user.netmon.dns.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.netmon.dns</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${PY}</string>
+    <string>${NETMON}/dns_monitor.py</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>${NETMON}</string>
+  <key>StandardOutPath</key>
+  <string>${NETMON}/dns.log</string>
+  <key>StandardErrorPath</key>
+  <string>${NETMON}/dns.err</string>
+</dict>
+</plist>
+EOF
+echo "  ✓ $AGENTS/com.user.netmon.dns.plist"
+
+echo ""
 echo "==> Setting menu bar visibility..."
 defaults write com.apple.controlcenter "NSStatusItem Visible netmon" -bool true
 

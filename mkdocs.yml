@@ -105,6 +105,7 @@ nav:
     - IP Blocking & pf: security/ip-blocking.md
     - Volume Anomaly Detection: security/volume-anomaly.md
     - Injection Guard: security/injection-guard.md
+    - DNS Exfiltration Detection: security/dns-exfil.md
   - API Reference: api-reference.md
   - MCP Integration: mcp.md
   - Architecture: architecture.md
