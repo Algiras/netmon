@@ -198,6 +198,15 @@ class Handler(BaseHTTPRequestHandler):
                 "pf_enforcement":     pf_on,
                 "setup_script":       str(Path.home() / ".netmon" / "setup-pf.sh"),
             }), "application/json")
+        elif self.path == "/api/process-policy":
+            policy_file = Path.home() / ".netmon" / "process_policy.json"
+            try:
+                policy = json.loads(policy_file.read_text()) if policy_file.exists() else {}
+            except Exception:
+                policy = {}
+            # Strip internal comment key before returning
+            policy.pop("_comment", None)
+            self._respond(200, json.dumps({"policy": policy}), "application/json")
         elif self.path == "/api/blocked-ips":
             blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
             meta_file    = Path.home() / ".netmon" / "blocked_ips_meta.json"

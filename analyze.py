@@ -791,6 +791,48 @@ def check_injection(context: str, llm_stage: bool = True) -> "str | None":
     return "llm_unknown_verdict"
 
 
+# ── Process policy (per-process expected-IP allowlist) ───────────────────────
+
+PROCESS_POLICY_FILE = NETMON_DIR / "process_policy.json"
+
+
+def _load_process_policy() -> dict:
+    if not PROCESS_POLICY_FILE.exists():
+        return {}
+    try:
+        return json.loads(PROCESS_POLICY_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _ip_in_cidrs(ip_str: str, cidrs: list) -> bool:
+    bare = ip_str.split(":")[0].strip("[]")
+    try:
+        addr = ipaddress.ip_address(bare)
+        return any(addr in ipaddress.ip_network(c, strict=False) for c in cidrs)
+    except ValueError:
+        return False
+
+
+def check_process_policy(proc: str, remote: str) -> "str | None":
+    """Return a human-readable violation message if proc is policy-restricted and
+    remote falls outside its expected CIDRs. Return None if no policy applies or
+    the IP is within the expected range."""
+    entry = _load_process_policy().get(proc)
+    if not entry:
+        return None
+    label    = entry.get("label", proc)
+    expected = entry.get("expected_cidrs", [])
+    if not expected:
+        return f"{label} connected to unexpected endpoint {remote} — no expected CIDRs configured"
+    if _ip_in_cidrs(remote, expected):
+        return None
+    return (
+        f"{label} connected to unexpected endpoint {remote} "
+        f"(expected CIDRs: {', '.join(expected)})"
+    )
+
+
 # ── LLM backends ─────────────────────────────────────────────────────────────
 
 _THINKING_MODELS = ("qwen3", "deepseek-r1", "deepseek-r2")
@@ -1308,6 +1350,36 @@ def main():
             continue
 
     for proc, lines in groups.items():
+        # ── Process policy check ──────────────────────────────────────────────
+        # Split lines: policy violations bypass the LLM entirely; clean lines proceed normally.
+        violation_events: list[tuple[str, str]] = []  # (remote, message)
+        clean_lines: list[str] = []
+        for line in lines:
+            try:
+                remote = line.split("] [ANOMALY] ", 1)[-1].split(" -> ", 1)[1].strip()
+                remote = sanitize_field(remote, max_len=64)
+                msg    = check_process_policy(proc, remote)
+                if msg:
+                    violation_events.append((remote, msg))
+                else:
+                    clean_lines.append(line)
+            except Exception:
+                clean_lines.append(line)
+
+        for remote, msg in violation_events:
+            _log(f"[POLICY_VIOLATION] proc='{proc}' remote='{remote}': {msg}")
+            send_notification(
+                process=proc[:64], remote=remote,
+                title=f"Policy violation: {proc}",
+                message=msg,
+                severity="critical",
+                recommended_action="reject",
+            )
+
+        lines = clean_lines
+        if not lines:
+            continue
+
         summary, _parsed = build_context(lines)
 
         # Injection guard: check assembled context before sending to analysis model

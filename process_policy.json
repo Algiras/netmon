@@ -1,0 +1,34 @@
+{
+  "_comment": "Per-process expected-IP allowlist. Any NEW connection from a listed process to an IP outside its expected_cidrs triggers a critical POLICY_VIOLATION alert, bypassing the LLM. Connections within expected_cidrs still go through normal review. Remove or leave expected_cidrs empty to flag ALL new connections from a process as violations.",
+  "2.1.119": {
+    "label": "Claude Code",
+    "expected_cidrs": [
+      "160.79.104.0/24",
+      "34.0.0.0/8",
+      "35.0.0.0/8",
+      "76.76.21.0/24",
+      "64.239.123.0/24"
+    ]
+  },
+  "2.1.118": {
+    "label": "Claude Code (prev version)",
+    "expected_cidrs": [
+      "160.79.104.0/24",
+      "34.0.0.0/8",
+      "35.0.0.0/8"
+    ]
+  },
+  "codex": {
+    "label": "OpenAI Codex",
+    "expected_cidrs": [
+      "104.16.0.0/12",
+      "172.64.0.0/13"
+    ]
+  },
+  "coder": {
+    "label": "Wix Coder",
+    "expected_cidrs": [
+      "10.0.0.0/8"
+    ]
+  }
+}

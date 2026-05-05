@@ -106,7 +106,8 @@ struct ActionBadge: View {
         case "INVESTIGATE":    return ("AI: Needs investigation","magnifyingglass",               .blue)
         case "AUTO-CONFIRMED": return ("Auto-confirmed",         "checkmark.circle.fill",        .green)
         case "AUTO-REJECTED":  return ("Auto-rejected",          "xmark.circle.fill",            .red)
-        case "BLOCKED":        return ("Injection blocked",       "shield.slash.fill",            .gray)
+        case "BLOCKED":          return ("Injection blocked",       "shield.slash.fill",              .gray)
+        case "POLICY_VIOLATION": return ("Policy violation",         "exclamationmark.shield.fill",    .red)
         default:
             guard !action.isEmpty else { return ("", "", .clear) }
             if action.hasPrefix("AUTO-") {
@@ -523,6 +524,23 @@ struct EventRow: View {
                         }
                         .padding(8)
                         .background(Color.gray.opacity(0.08))
+                        .cornerRadius(6)
+                    } else if parsed.action == "POLICY_VIOLATION" {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Process Policy Violation", systemImage: "exclamationmark.shield.fill")
+                                .font(.caption2).foregroundStyle(.red)
+                            Text("This process connected to an IP outside its expected range.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !parsed.text.isEmpty {
+                                Text(parsed.text)
+                                    .font(.caption).foregroundStyle(.primary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.red.opacity(0.08))
                         .cornerRadius(6)
                     } else if !parsed.action.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {

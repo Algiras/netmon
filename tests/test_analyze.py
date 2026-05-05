@@ -775,5 +775,52 @@ class TestRunWithToolsClaude(unittest.TestCase):
         self.assertEqual(result["message"]["content"], "SAFE")
 
 
+class TestProcessPolicy(unittest.TestCase):
+    def _policy(self):
+        return {
+            "myagent": {
+                "label": "My Agent",
+                "expected_cidrs": ["10.0.0.0/8", "192.168.1.0/24"],
+            },
+            "restricted": {
+                "label": "Restricted Process",
+                "expected_cidrs": [],
+            },
+        }
+
+    def _check(self, proc, remote, policy=None):
+        p = policy or self._policy()
+        with patch("analyze._load_process_policy", return_value=p):
+            return analyze.check_process_policy(proc, remote)
+
+    def test_unknown_process_returns_none(self):
+        self.assertIsNone(self._check("unknown", "1.2.3.4:443"))
+
+    def test_ip_within_cidr_returns_none(self):
+        self.assertIsNone(self._check("myagent", "10.5.6.7:443"))
+
+    def test_ip_outside_cidr_returns_message(self):
+        msg = self._check("myagent", "8.8.8.8:443")
+        self.assertIsNotNone(msg)
+        self.assertIn("unexpected endpoint", msg)
+        self.assertIn("8.8.8.8", msg)
+
+    def test_no_expected_cidrs_always_violations(self):
+        msg = self._check("restricted", "1.2.3.4:443")
+        self.assertIsNotNone(msg)
+        self.assertIn("no expected CIDRs", msg)
+
+    def test_strips_port_from_remote(self):
+        self.assertIsNone(self._check("myagent", "192.168.1.50:8080"))
+
+    def test_policy_violation_label_in_message(self):
+        msg = self._check("myagent", "8.8.8.8:443")
+        self.assertIn("My Agent", msg)
+
+    def test_ipv4_mapped_ipv6_within_cidr(self):
+        # bare IPv4 extracted from "[::ffff:10.0.0.1]:443" form
+        self.assertIsNone(self._check("myagent", "10.0.0.1:443"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
