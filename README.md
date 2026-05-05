@@ -53,12 +53,15 @@ bash ~/.netmon/install.sh
 ```
 
 `install.sh`:
-1. Pulls `granite4.1:3b` and `nomic-embed-text-v2-moe` from Ollama
-2. Writes four LaunchAgent plists to `~/Library/LaunchAgents/`
-3. Builds the Swift menu bar app
-4. Loads all agents — they will restart automatically at every login
+1. Checks dependencies (python3, ollama, xcrun)
+2. Installs Python packages (`anthropic`, `mcp`)
+3. Pulls `granite4.1:3b` and `nomic-embed-text-v2-moe` from Ollama
+4. Writes LaunchAgent plists to `~/Library/LaunchAgents/`
+5. Builds the Swift menu bar app and loads all agents
 
 After install you'll see `⚡` in your menu bar and the panel at http://localhost:6543.
+
+The panel API is token-protected. The token is auto-generated at `~/.netmon/panel_token` on first run — the menu bar app reads it automatically. For `curl` access use `$(cat ~/.netmon/panel_token)`.
 
 ---
 
@@ -77,13 +80,17 @@ The panel's model bar shows only models that support the required capability (`t
 
 Switch via API:
 ```bash
+TOKEN=$(cat ~/.netmon/panel_token)
+
 # Change LLM
 curl -X POST http://localhost:6543/config \
+  -H "Host: localhost:6543" -H "X-Netmon-Token: $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"llm_model": "llama3.2:3b"}'
 
 # Change embedding model (clears stored vectors)
 curl -X POST http://localhost:6543/config \
+  -H "Host: localhost:6543" -H "X-Netmon-Token: $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"embed_model": "nomic-embed-text:latest", "_clear_embeddings": true}'
 ```

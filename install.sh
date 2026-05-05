@@ -21,6 +21,7 @@ ollama pull nomic-embed-text-v2-moe
 echo ""
 echo "==> Installing Python dependencies..."
 pip3 install -q --upgrade pip
+pip3 install -q -r "$NETMON/requirements.txt"
 
 echo ""
 echo "==> Writing LaunchAgent plists..."
