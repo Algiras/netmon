@@ -1,18 +1,19 @@
-# netmon — Architecture Overview
+# Architecture
 
-## Purpose
+## Overview
 
-Local-machine network monitor for macOS. Detects unexpected outbound connections from any process, with AI-assisted triage and specific hardening for AI agent processes.
-
-## Component Map
+netmon is a collection of small, single-purpose components connected by flat files and a local SQLite database. Each component can be restarted, replaced, or debugged independently.
 
 ```
 launchd (60-second timer)
     └── monitor.sh               # lsof snapshot → anomaly log
         └── volume_check.py      # connection-count spike detection
 
-launchd (60-second timer, heartbeat)
+launchd (5-minute timer)
     └── analyze.py               # reads anomaly log → AI triage → DB + notifications
+
+launchd (60-second timer)
+    └── analyze.py --recheck     # re-evaluate pending events (heartbeat)
 
 ~/.netmon/netmon.db              # SQLite: events + embeddings
 ~/.netmon/baseline.txt           # confirmed-safe process|remote pairs
@@ -21,72 +22,122 @@ launchd (60-second timer, heartbeat)
 ~/.netmon/connection_counts.json # rolling per-pair connection-count history
 ~/.netmon/process_policy.json    # per-process expected-IP allowlist (AI agents)
 ~/.netmon/config.json            # user settings
+~/.netmon/panel_token            # 64-char auth token (mode 0600)
 
-panel.py                         # local HTTP server (localhost:6543)
+panel.py                         # local HTTP API server (localhost:6543)
     ├── GET  /api/events          # pending + recent events + config
+    ├── GET  /api/config          # current settings
+    ├── GET  /api/models          # Ollama model capabilities
     ├── GET  /api/baseline        # baseline entries
     ├── GET  /api/blocked-ips     # blocked IPs with metadata
     ├── GET  /api/pf-status       # pf enforcement status
     ├── GET  /api/process-policy  # per-process IP allowlist
-    ├── GET  /api/models          # Ollama model list
     ├── POST /action              # confirm / reject / revert event
     ├── POST /config              # update settings
     ├── POST /baseline/remove     # remove baseline entry
     ├── POST /unblock-ip          # remove IP from block list
     └── POST /recheck             # trigger reanalysis
 
-MenuBar app (Swift)
+MenuBar/ (Swift)
     ├── NetmonMenuBar             # status bar icon + quick-action menu
-    ├── PanelWindowController     # embedded SwiftUI web view (panel UI)
+    ├── PanelWindowController     # native SwiftUI panel window
     └── Notifier                  # UNUserNotification sender
+
+netmon_mcp.py                    # MCP server (stdio transport)
 ```
 
-## Data Flow
+---
+
+## Data flow
+
+### Detection path
 
 ```
-lsof snapshot
-    → comm -23 vs baseline.txt        (new pairs only)
-    → [ANOMALY] lines in anomalies.log
-
-volume_check.py
-    → lsof counts per pair
-    → rolling window in connection_counts.json
-    → [VOLUME_ANOMALY] lines in anomalies.log (on spike)
-
-analyze.py reads anomaly log:
-    1. Injection guard (regex + optional LLM)  → [BLOCKED] event
-    2. Process policy check                    → [POLICY_VIOLATION] event (no LLM)
-    3. LLM triage (Ollama or Claude)           → tool calls:
-        - send_notification  → DB insert + macOS notification
-        - add_to_review      → DB insert (pending)
-        - mark_as_normal     → DB insert (confirmed) + baseline entry
-        - auto_resolve       → DB update
-    4. Sweep/recheck pending events via RAG similarity
+lsof -i 4 (60 s)
+    → comm -23 vs baseline.txt        ← new process×IP pairs only
+    → volume_check.py                 ← spike detection on existing pairs
+    → [ANOMALY] / [VOLUME_ANOMALY] lines → anomalies.log
 ```
 
-## Alert Severities
+### Analysis path
+
+```
+analyze.py reads anomalies.log:
+    1. Injection guard          → [BLOCKED] event (Critical, no LLM)
+    2. Process policy check     → [POLICY_VIOLATION] event (Critical, no LLM)
+    3. Baseline dedup           → already known? skip
+    4. Embed new event          → Ollama /api/embed
+    5. RAG lookup               → cosine similarity vs past events in DB
+    6. Build LLM context        → event + similar past decisions
+    7. LLM triage               → tool call:
+        send_notification       → DB insert (pending) + macOS notification
+        auto_resolve(confirmed) → DB insert (confirmed) + baseline entry
+        auto_resolve(rejected)  → DB insert (rejected) + IP blocked
+        mark_as_normal          → DB insert (confirmed) + baseline entry
+```
+
+### Heartbeat path
+
+```
+analyze.py --recheck (60 s):
+    → re-fetch all pending events from DB
+    → re-embed + re-run RAG
+    → re-triage with latest context
+    → update DB if decision changed
+```
+
+---
+
+## Component details
+
+### monitor.sh
+
+Runs `lsof -i 4 -n -P` (all IPv4 connections, no DNS resolution, numeric ports), normalises the output to `process|IP:port` pairs, diffs against `baseline.txt` with `comm -23`, and appends `[ANOMALY]` lines to `anomalies.log`.
+
+Runs every 60 seconds via LaunchAgent. Lightweight — no Python, no network calls, no LLM.
+
+### analyze.py
+
+The core intelligence layer. Reads unprocessed lines from `anomalies.log` (tracked by byte offset in `analysis.log`), applies the security layers in order, embeds each event, retrieves similar past events, and sends the assembled context to the LLM.
+
+LLM backend: Ollama (default) or Anthropic Claude API (cloud, optional).
+
+### db.py
+
+Thin SQLite wrapper. Tables:
+- `events` — all triage events with status, severity, type, summary
+- `events.embedding` — serialised float32 vector for RAG
+- In-process cosine similarity search (no vector DB dependency)
+
+### embed.py
+
+Calls `POST http://localhost:11434/api/embed` with the configured embed model. Returns a list of floats. Model is configurable; switching clears all stored embeddings.
+
+### panel.py
+
+`http.server`-based HTTP server. Single-threaded (Python GIL), sufficient for local use. All routes require `Host: localhost:6543` and `X-Netmon-Token` headers. Token is generated at first boot and stored at `~/.netmon/panel_token` (mode 0600).
+
+### MenuBar (Swift)
+
+SwiftUI app that runs as a menu bar item (`.accessoryOnly` activation policy). Uses `UNUserNotificationCenter` for system notifications. The panel is a native `NSWindow` with a SwiftUI view — not a web view. Reads the panel token from disk once at startup.
+
+---
+
+## Alert severities
 
 | Tag | Severity | Routed via | Requires human? |
 |-----|----------|-----------|-----------------|
-| `[BLOCKED]` | critical | Direct DB insert | Yes — no AI review |
-| `[POLICY_VIOLATION]` | critical | Direct DB insert + notify | Yes — no AI review |
-| `[VOLUME_ANOMALY]` | warning+ | LLM triage | Depends on LLM decision |
-| `[ANOMALY]` | info–critical | LLM triage | Depends on LLM decision |
+| `[BLOCKED]` | Critical | Direct DB insert | Yes — no AI review |
+| `[POLICY_VIOLATION]` | Critical | Direct DB insert + notify | Yes — no AI review |
+| `[VOLUME_ANOMALY]` | Warning+ | LLM triage | Depends on LLM decision |
+| `[ANOMALY]` | Info–Critical | LLM triage | Depends on LLM decision |
 
-## Backends
+---
 
-`analyze.py` supports two LLM backends, selected via `config.json`:
+## Security design
 
-- **ollama** (default) — local inference via Ollama REST API (`localhost:11434`)
-- **claude** — Anthropic API via `ANTHROPIC_API_KEY`
-
-The embed model is always local (Ollama) for RAG/similarity lookups.
-
-## Security Layers
-
-1. **Baseline** — process×IP pairs confirmed safe; new pairs trigger review
-2. **Injection guard** — regex + optional LLM scan on assembled context before LLM triage
-3. **Process policy** — per-process expected CIDR allowlist; violations skip LLM entirely
-4. **Volume check** — rolling connection-count baseline; spike = anomaly even for known pairs
-5. **IP blocking** — manual or reject-triggered; optional pf enforcement (`setup-pf.sh`)
-6. **RAG cascade** — similar past decisions auto-applied to new events (cosine sim > 0.88)
+- **Loopback-only** — panel server binds to `127.0.0.1:6543`, no LAN exposure
+- **Token auth** — all panel routes require `X-Netmon-Token` (timing-safe comparison)
+- **No cloud by default** — all inference local via Ollama; cloud backend is opt-in
+- **AI agent protection** — process policy + injection guard specifically target AI agent exfiltration and prompt injection
+- **Kernel enforcement** — optional pf anchor blocks rejected IPs at the network layer

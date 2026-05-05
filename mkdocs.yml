@@ -1,0 +1,80 @@
+site_name: netmon
+site_description: Local network anomaly monitor for macOS — AI-assisted triage, private by default
+site_url: https://algiras.github.io/netmon
+repo_url: https://github.com/Algiras/netmon
+repo_name: Algiras/netmon
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: deep purple
+    accent: purple
+  font:
+    text: Inter
+    code: JetBrains Mono
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - tables
+  - attr_list
+  - def_list
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started.md
+    - First Run: first-run.md
+  - User Guide:
+    - Panel UI: user-guide/panel.md
+    - Notifications: user-guide/notifications.md
+    - Review vs Autonomous: user-guide/modes.md
+  - Configuration:
+    - config.json Reference: configuration/config.md
+    - Process Policy: configuration/process-policy.md
+    - Models: configuration/models.md
+  - Security Features:
+    - Overview: security/index.md
+    - Baseline Management: security/baseline.md
+    - IP Blocking & pf: security/ip-blocking.md
+    - Volume Anomaly Detection: security/volume-anomaly.md
+    - Injection Guard: security/injection-guard.md
+  - API Reference: api-reference.md
+  - MCP Integration: mcp.md
+  - Architecture: architecture.md
+  - Troubleshooting: troubleshooting.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Algiras/netmon
