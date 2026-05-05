@@ -294,7 +294,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var menuBarController: NetmonMenuBar?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        menuBarController = NetmonMenuBar()   // icon first — always visible
+        // notify subprocesses only fire a notification — they don't need the menu bar or polling
+        let isNotifyMode = CommandLine.arguments.count >= 2 && CommandLine.arguments[1] == "notify"
+        if !isNotifyMode {
+            menuBarController = NetmonMenuBar()
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             setupNotifications(delegate: self)
         }
