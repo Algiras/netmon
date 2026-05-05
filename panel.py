@@ -117,20 +117,44 @@ class Handler(BaseHTTPRequestHandler):
             body   = json.loads(self.rfile.read(length))
             db.update_status(int(body["id"]), body["action"])
 
+            action = body["action"]
+
+            with db._conn() as c:
+                row = c.execute(
+                    "SELECT process,remote,status FROM events WHERE id=?", (body["id"],)
+                ).fetchone()
+
             # If confirmed, add to baseline
-            if body["action"] == "confirmed":
-                with db._conn() as c:
-                    row = c.execute(
-                        "SELECT process,remote FROM events WHERE id=?", (body["id"],)
-                    ).fetchone()
-                if row:
-                    baseline = Path.home() / ".netmon" / "baseline.txt"
-                    entry = f"{row['process']}|{row['remote']}"
-                    if baseline.exists():
-                        existing = set(baseline.read_text().splitlines())
-                        if entry not in existing:
-                            with baseline.open("a") as f:
-                                f.write(entry + "\n")
+            if action == "confirmed" and row:
+                baseline = Path.home() / ".netmon" / "baseline.txt"
+                entry = f"{row['process']}|{row['remote']}"
+                if baseline.exists():
+                    existing = set(baseline.read_text().splitlines())
+                    if entry not in existing:
+                        with baseline.open("a") as f:
+                            f.write(entry + "\n")
+
+            # Revert: reset to pending, undo baseline/block side-effects
+            if action == "revert" and row:
+                db.update_status(int(body["id"]), "pending")
+                # Remove from baseline if it was confirmed
+                baseline = Path.home() / ".netmon" / "baseline.txt"
+                entry = f"{row['process']}|{row['remote']}"
+                if baseline.exists():
+                    lines = baseline.read_text().splitlines()
+                    new_lines = [l for l in lines if l.strip() != entry]
+                    if len(new_lines) != len(lines):
+                        baseline.write_text("\n".join(new_lines) + ("\n" if new_lines else ""))
+                # Remove IP from blocked list if it was rejected
+                blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
+                bare_ip = row['remote'].split(":")[0]
+                if blocked_file.exists():
+                    ips = blocked_file.read_text().splitlines()
+                    new_ips = [ip for ip in ips if ip.strip() != bare_ip]
+                    if len(new_ips) != len(ips):
+                        blocked_file.write_text("\n".join(new_ips) + ("\n" if new_ips else ""))
+                self._respond(200, '{"ok":true}', "application/json")
+                return
 
             self._respond(200, '{"ok":true}', "application/json")
         else:

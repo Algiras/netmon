@@ -26,7 +26,8 @@ ANALYSIS_LOG  = NETMON_DIR / "analysis.log"
 CURSOR_FILE   = NETMON_DIR / ".analyze_cursor"
 CONFIG_FILE   = NETMON_DIR / "config.json"
 PANEL_URL     = "http://localhost:6543"
-MENUBAR_BIN   = NETMON_DIR / "NetmonMenuBar.app" / "Contents" / "MacOS" / "NetmonMenuBar"
+MENUBAR_BIN   = Path("/Applications/NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar")
+BLOCKED_FILE  = NETMON_DIR / "blocked_ips.txt"
 
 
 def read_config() -> dict:
@@ -99,6 +100,63 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_process_info",
+            "description": (
+                "Gather forensic details about a process before deciding: active network connections, "
+                "command line, parent process, open files. Call this when the process name is ambiguous "
+                "or you need more context before acting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "process_name": {"type": "string", "description": "Process name (as seen in anomaly log)"},
+                },
+                "required": ["process_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kill_process",
+            "description": (
+                "Terminate a suspicious process. Sends SIGTERM (graceful) by default; "
+                "set force=true for SIGKILL. Only use when a process is actively exfiltrating "
+                "or the behavior is clearly malicious."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "process_name": {"type": "string"},
+                    "reason":       {"type": "string", "description": "Why this process is being killed"},
+                    "force":        {"type": "boolean", "description": "Use SIGKILL instead of SIGTERM (default false)"},
+                },
+                "required": ["process_name", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "block_ip",
+            "description": (
+                "Block outbound connections to a remote IP. Adds to ~/.netmon/blocked_ips.txt "
+                "and applies via pfctl if the netmon anchor is configured. "
+                "Use for IPs confirmed malicious, not just suspicious."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ip":     {"type": "string", "description": "IP address to block (no port)"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["ip", "reason"],
+            },
+        },
+    },
 ]
 
 
@@ -165,6 +223,82 @@ def mark_as_normal(process, remote, reason="") -> str:
     return "added to baseline"
 
 
+def get_process_info(process_name: str) -> str:
+    lines = []
+    # Network connections via lsof
+    try:
+        r = subprocess.run(
+            ["lsof", "-nP", "-i", "-a", "-c", process_name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.stdout.strip():
+            lines.append("=== Network connections (lsof) ===")
+            lines.append(r.stdout.strip())
+    except Exception as e:
+        lines.append(f"lsof error: {e}")
+
+    # Process details via ps
+    try:
+        r = subprocess.run(
+            ["ps", "aux"],
+            capture_output=True, text=True, timeout=5,
+        )
+        matching = [l for l in r.stdout.splitlines() if process_name.lower() in l.lower()]
+        if matching:
+            lines.append("=== ps aux matches ===")
+            lines.extend(matching[:10])
+    except Exception as e:
+        lines.append(f"ps error: {e}")
+
+    result = "\n".join(lines) if lines else f"No info found for process '{process_name}'"
+    _log(f"[INFO] get_process_info({process_name}): {len(lines)} lines")
+    return result[:2000]
+
+
+def kill_process(process_name: str, reason: str, force: bool = False) -> str:
+    sig = ["-9"] if force else []
+    try:
+        r = subprocess.run(
+            ["killall"] + sig + [process_name],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            _log(f"[KILL{'(SIGKILL)' if force else ''}] {process_name}: {reason}")
+            return f"killed {process_name}"
+        else:
+            msg = r.stderr.strip() or "no matching process"
+            _log(f"[KILL/FAIL] {process_name}: {msg}")
+            return f"kill failed: {msg}"
+    except Exception as e:
+        _log(f"[KILL/ERROR] {process_name}: {e}")
+        return f"error: {e}"
+
+
+def block_ip(ip: str, reason: str) -> str:
+    # Strip port if accidentally included
+    bare_ip = ip.split(":")[0]
+
+    existing = set(BLOCKED_FILE.read_text().splitlines()) if BLOCKED_FILE.exists() else set()
+    if bare_ip not in existing:
+        with BLOCKED_FILE.open("a") as f:
+            f.write(bare_ip + "\n")
+
+    # Try pfctl table update (works if netmon anchor is loaded)
+    pfctl_ok = False
+    try:
+        r = subprocess.run(
+            ["pfctl", "-t", "netmon_blocked", "-T", "add", bare_ip],
+            capture_output=True, text=True, timeout=5,
+        )
+        pfctl_ok = r.returncode == 0
+    except Exception:
+        pass
+
+    status = "blocked via pfctl" if pfctl_ok else "added to blocklist (pfctl anchor not configured)"
+    _log(f"[BLOCK] {bare_ip}: {reason} — {status}")
+    return status
+
+
 def dispatch(name: str, args: dict) -> str:
     if isinstance(args, str):
         try:
@@ -191,6 +325,19 @@ def dispatch(name: str, args: dict) -> str:
             process = args.get("process", ""),
             remote  = args.get("remote",  ""),
             reason  = args.get("reason",  ""),
+        )
+    if name == "get_process_info":
+        return get_process_info(args.get("process_name", ""))
+    if name == "kill_process":
+        return kill_process(
+            process_name = args.get("process_name", ""),
+            reason       = args.get("reason", ""),
+            force        = bool(args.get("force", False)),
+        )
+    if name == "block_ip":
+        return block_ip(
+            ip     = args.get("ip", ""),
+            reason = args.get("reason", ""),
         )
     return f"unknown tool: {name}"
 
@@ -331,6 +478,9 @@ Decision guide:
   - Connections matching previously-rejected patterns in memory
   - AI agent tooling calling unexpected APIs
 • mark_as_normal: when a connection is clearly routine but not yet in baseline.
+• get_process_info: call FIRST when the process is unfamiliar or the behavior needs more context.
+• kill_process: only if a process is actively exfiltrating or clearly malicious.
+• block_ip: only for confirmed malicious IPs, not just unusual ones.
 
 Past events with status='confirmed' are approved by the user — treat similarly.
 Past events with status='rejected' are suspicious — alert if seen again.
@@ -349,6 +499,9 @@ For every event call exactly one tool:
   non-standard ports, repeated scanning pattern, matches a previously-rejected event in memory).
 • send_notification: ONLY for critical active threats needing immediate human attention
   (e.g. data exfiltration in progress, known malware IPs, reverse shell indicators).
+• get_process_info: call when you need more context before acting.
+• kill_process: use when a process is actively exfiltrating — confirm first with get_process_info.
+• block_ip: use for confirmed malicious IPs; prefer over kill when the process is legitimate but the IP is not.
 
 Past events with status='confirmed' → confirm similar ones.
 Past events with status='rejected' → reject similar ones.

@@ -58,6 +58,10 @@ class PanelModel: ObservableObject {
         postAction(id: id, action: "rejected")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
     }
+    func revert(_ id: Int) {
+        postAction(id: id, action: "revert")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
+    }
     func toggleMode() {
         toggleAutonomousMode()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
@@ -119,6 +123,7 @@ struct EventRow: View {
     let event: Event
     var onConfirm: (() -> Void)? = nil
     var onReject:  (() -> Void)? = nil
+    var onRevert:  (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -144,9 +149,19 @@ struct EventRow: View {
                         .buttonStyle(.borderedProminent).tint(.red)
                 }
             } else {
-                Text(event.status.uppercased())
-                    .font(.caption2).bold()
-                    .foregroundStyle(event.status == "confirmed" ? Color.green : .red)
+                HStack(spacing: 8) {
+                    Text(event.status.uppercased())
+                        .font(.caption2).bold()
+                        .foregroundStyle(statusColor(event.status))
+                    if let revert = onRevert {
+                        Button(action: revert) {
+                            Label("Revert", systemImage: "arrow.uturn.backward")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                }
             }
         }
         .padding(.vertical, 4)
@@ -154,6 +169,14 @@ struct EventRow: View {
 
     private func icon(_ s: String) -> String {
         switch s { case "critical": return "🚨"; case "warning": return "⚠️"; default: return "ℹ️" }
+    }
+
+    private func statusColor(_ s: String) -> Color {
+        switch s {
+        case "confirmed": return .green
+        case "rejected":  return .red
+        default:          return .secondary
+        }
     }
 }
 
@@ -241,7 +264,10 @@ struct PanelView: View {
 
     private var historyTab: some View {
         List(model.recent, id: \.id) { e in
-            EventRow(event: e)
+            EventRow(
+                event:    e,
+                onRevert: e.status != "pending" ? { model.revert(e.id) } : nil
+            )
             Divider()
         }
     }
