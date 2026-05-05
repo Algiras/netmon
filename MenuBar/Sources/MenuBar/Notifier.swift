@@ -30,13 +30,27 @@ func setupNotifications(delegate: UNUserNotificationCenterDelegate) {
     center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
 }
 
-func sendNotification(eventID: String, title: String, body: String, severity: String) {
+func sendNotification(eventID: String, title: String, body: String,
+                      severity: String, recommendedAction: String = "investigate") {
     let center  = UNUserNotificationCenter.current()
     let content = UNMutableNotificationContent()
 
     let icons: [String: String] = ["info": "ℹ️", "warning": "⚠️", "critical": "🚨"]
-    content.title              = "\(icons[severity] ?? "⚠️") \(title)"
-    content.body               = "\(body)  ·  Tap to review in netmon"
+    let icon = icons[severity] ?? "⚠️"
+
+    // Action label shown as subtitle so the user knows urgency at a glance
+    let actionLabels: [String: String] = [
+        "confirm":      "Looks safe — confirm?",
+        "reject":       "Suspicious — reject?",
+        "block_ip":     "Block IP recommended",
+        "kill_process": "Kill process recommended",
+        "investigate":  "Needs investigation",
+    ]
+    let actionLabel = actionLabels[recommendedAction] ?? "Needs review"
+
+    content.title              = "\(icon) \(title)"
+    content.subtitle           = "AI: \(actionLabel)"
+    content.body               = body
     content.categoryIdentifier = CATEGORY_ID
 
     switch severity {

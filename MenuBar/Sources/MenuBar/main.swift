@@ -345,9 +345,14 @@ let args = CommandLine.arguments
 if args.count >= 6, args[1] == "notify" {
     app.setActivationPolicy(.accessory)
     app.delegate = delegate
-    // Notification will be sent after app finishes launching via the delegate
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-        sendNotification(eventID: args[2], title: args[3], body: args[4], severity: args[5])
+        sendNotification(
+            eventID:           args[2],
+            title:             args[3],
+            body:              args[4],
+            severity:          args[5],
+            recommendedAction: args.count >= 7 ? args[6] : "investigate"
+        )
     }
 } else {
     app.setActivationPolicy(.accessory)

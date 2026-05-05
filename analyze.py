@@ -320,6 +320,9 @@ def send_notification(process, remote, title, message, severity,
 
     summary_text = f"[{recommended_action.upper()}] {title}: {message}"
 
+    # Notification body: clean prose without the [ACTION] prefix (subtitle carries that)
+    notif_body = message[:200]
+
     # Insert into DB first to get the row ID (needed for notification action callbacks)
     vector   = emb.embed_event(process, remote, message)
     event_id = db.insert_event(
@@ -332,13 +335,17 @@ def send_notification(process, remote, title, message, severity,
     # Falls back to osascript if the binary isn't built yet
     if MENUBAR_BIN.exists():
         subprocess.Popen(
-            [str(MENUBAR_BIN), "notify", str(event_id), title, message, severity],
+            [str(MENUBAR_BIN), "notify", str(event_id), title, notif_body, severity, recommended_action],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     else:
         sounds  = {"info": "Glass", "warning": "Basso", "critical": "Sosumi"}
+        action_labels = {"confirm": "Looks safe", "reject": "Suspicious",
+                         "block_ip": "Block IP", "kill_process": "Kill process",
+                         "investigate": "Needs investigation"}
+        action_hint  = action_labels.get(recommended_action, "Needs review")
         # Strip backslashes and double-quotes to prevent AppleScript injection
-        safe_msg     = message.replace('\\', '\\\\').replace('"', "'")
+        safe_msg     = f"AI: {action_hint} — {notif_body}".replace('\\', '\\\\').replace('"', "'")
         safe_heading = f"{icons.get(severity,'⚠️')} {title}".replace('\\', '\\\\').replace('"', "'")
         subprocess.Popen(
             ["osascript", "-e",
