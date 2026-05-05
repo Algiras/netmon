@@ -129,7 +129,7 @@ class PanelModel: ObservableObject {
             let logPath = NSHomeDirectory() + "/.netmon/analysis.log"
             guard let lines = try? String(contentsOfFile: logPath, encoding: .utf8).components(separatedBy: "\n"),
                   let last  = lines.reversed().first(where: { $0.contains("[ANALYZE") || $0.contains("[AUTO") || $0.contains("[SWEEP") }) else { return }
-            let ts = String(last.prefix(21).dropFirst())  // "[YYYY-MM-DD HH:MM:SS]"
+            let ts = String(last.dropFirst().prefix(19))  // "[YYYY-MM-DD HH:MM:SS]" → drop "[", take 19
             DispatchQueue.main.async { self.lastAnalyzed = ts }
         }
     }
@@ -352,7 +352,7 @@ struct PanelView: View {
 
     // MARK: Header
     private var header: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Text("⚡ netmon").font(.headline)
             if model.pending.count > 0 {
                 Text("\(model.pending.count) pending")
@@ -361,18 +361,30 @@ struct PanelView: View {
             Spacer()
             if !model.lastAnalyzed.isEmpty {
                 Text("Last run \(model.lastAnalyzed)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
+            // Compact mode chip — tap to toggle
             Button(action: { model.toggleMode() }) {
-                Label(
-                    model.autonomousMode ? "🤖 Autonomous" : "👁 Review",
-                    systemImage: model.autonomousMode ? "brain" : "eye"
-                )
+                HStack(spacing: 4) {
+                    Image(systemName: model.autonomousMode ? "brain" : "eye")
+                        .font(.caption)
+                    Text(model.autonomousMode ? "Auto" : "Review")
+                        .font(.caption).fontWeight(.medium)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(model.autonomousMode
+                    ? Color.purple.opacity(0.15)
+                    : Color.blue.opacity(0.12))
+                .foregroundStyle(model.autonomousMode ? Color.purple : Color.blue)
+                .cornerRadius(6)
             }
+            .buttonStyle(.plain)
+            .disabled(!model.ollamaAvailable)
             Button(action: { model.refresh() }) {
-                Image(systemName: "arrow.clockwise")
+                Image(systemName: "arrow.clockwise").font(.caption)
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .background(Color(NSColor.controlBackgroundColor))
@@ -447,19 +459,16 @@ struct PanelView: View {
 
     private var settingsTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // Ollama status banner
+            VStack(alignment: .leading, spacing: 16) {
+
+                // ── Status banner (Ollama down / models missing) ──────────────
                 if !model.ollamaAvailable {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Ollama not running").fontWeight(.semibold)
-                            Text("Start Ollama to enable LLM analysis and autonomous mode.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Start") {
+                    statusBanner(
+                        icon: "exclamationmark.triangle.fill", color: .orange,
+                        title: "Ollama not running",
+                        message: "Start Ollama to enable LLM analysis and autonomous mode."
+                    ) {
+                        Button("Start Ollama") {
                             let t = Process()
                             t.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
                             t.arguments = ["serve"]
@@ -468,169 +477,183 @@ struct PanelView: View {
                         }
                         .buttonStyle(.borderedProminent).tint(.orange)
                     }
-                    .padding(10)
-                    .background(Color.orange.opacity(0.1))
-                    .cornerRadius(8)
                 } else if model.llmModels.isEmpty || model.embedModels.isEmpty {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundStyle(.blue)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Models not downloaded").fontWeight(.semibold)
-                            Text("LLM and embedding models are required for analysis.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
+                    statusBanner(
+                        icon: "arrow.down.circle.fill", color: .blue,
+                        title: "Models not downloaded",
+                        message: "LLM and embedding models are required for analysis."
+                    ) {
                         Button(action: { model.pullModels() }) {
                             HStack(spacing: 4) {
                                 if model.isPulling { ProgressView().scaleEffect(0.7) }
-                                Text(model.isPulling ? "Downloading…" : "Download")
+                                Text(model.isPulling ? "Downloading…" : "Download Models")
                             }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.isPulling)
+                        .buttonStyle(.borderedProminent).disabled(model.isPulling)
                     }
-                    .padding(10)
-                    .background(Color.blue.opacity(0.1))
-                    .cornerRadius(8)
-                    if !model.pullLog.isEmpty {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 2) {
-                                ForEach(model.pullLog, id: \.self) { line in
-                                    Text(line).font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                        }
-                        .frame(height: 80)
-                        .background(Color(NSColor.textBackgroundColor))
-                        .cornerRadius(6)
-                    }
+                    if !model.pullLog.isEmpty { logView(model.pullLog, height: 80) }
                 }
 
-                // Autonomous mode
-                GroupBox("Mode") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Autonomous mode", isOn: Binding(
-                            get: { model.autonomousMode },
-                            set: { _ in model.toggleMode() }
-                        ))
-                        .disabled(!model.ollamaAvailable)
-                        Text(
-                            !model.ollamaAvailable
-                                ? "Ollama required — manual review only."
-                                : model.autonomousMode
-                                    ? "LLM auto-resolves events without human review."
-                                    : "LLM flags events for your approval."
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-
+                // ── Analysis ─────────────────────────────────────────────────
+                // Groups mode toggle + LLM model picker + run button together
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        // Mode toggle row
+                        HStack(alignment: .top, spacing: 10) {
+                            Toggle("", isOn: Binding(
+                                get: { model.autonomousMode },
+                                set: { _ in model.toggleMode() }
+                            ))
+                            .labelsHidden()
+                            .disabled(!model.ollamaAvailable)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Autonomous mode").fontWeight(.medium)
+                                Text(
+                                    !model.ollamaAvailable
+                                    ? "Ollama required — manual review only."
+                                    : model.autonomousMode
+                                        ? "LLM resolves all events automatically without your review."
+                                        : "LLM flags events and waits for your confirm/reject."
+                                )
+                                .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                         Divider()
-
-                        Button(action: { model.resolveAll() }) {
-                            HStack {
-                                if model.isResolving {
-                                    ProgressView().scaleEffect(0.7)
+                        // LLM model picker
+                        HStack {
+                            Text("Model").font(.caption).foregroundStyle(.secondary)
+                                .frame(width: 44, alignment: .trailing)
+                            Picker("", selection: Binding(
+                                get: { model.selectedLLM },
+                                set: { model.setLLM($0) }
+                            )) {
+                                ForEach(model.llmModels, id: \.name) { m in
+                                    Text("\(m.name)  (\(m.size))").tag(m.name)
                                 }
-                                Text(model.isResolving ? "Analysing…" : "▶  Run analysis now (all pending)")
+                                if model.llmModels.isEmpty {
+                                    Text(model.selectedLLM.isEmpty ? "Loading…" : model.selectedLLM)
+                                        .tag(model.selectedLLM)
+                                }
                             }
+                            .pickerStyle(.menu)
                         }
-                        .disabled(model.isResolving)
-
-                        if !model.resolveLog.isEmpty {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    ForEach(model.resolveLog, id: \.self) { line in
-                                        Text(line).font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(.secondary)
+                        Divider()
+                        // Run button
+                        HStack {
+                            Button(action: { model.resolveAll() }) {
+                                HStack(spacing: 6) {
+                                    if model.isResolving {
+                                        ProgressView().scaleEffect(0.7)
+                                    } else {
+                                        Image(systemName: "play.fill").font(.caption)
                                     }
+                                    Text(model.isResolving ? "Analysing…" : "Run analysis now")
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(8)
                             }
-                            .frame(height: 100)
-                            .background(Color(NSColor.textBackgroundColor))
-                            .cornerRadius(6)
+                            .disabled(model.isResolving || !model.ollamaAvailable)
+                            Spacer()
                         }
+                        if !model.resolveLog.isEmpty { logView(model.resolveLog, height: 100) }
                     }
                     .padding(8)
+                } label: {
+                    Label("Analysis", systemImage: "brain").font(.caption).foregroundStyle(.secondary)
                 }
 
-                // LLM model
-                GroupBox("Analysis Model") {
-                    Picker("", selection: Binding(
-                        get: { model.selectedLLM },
-                        set: { model.setLLM($0) }
-                    )) {
-                        ForEach(model.llmModels, id: \.name) { m in
-                            Text("\(m.name)  (\(m.size))").tag(m.name)
+                // ── Memory ───────────────────────────────────────────────────
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Model").font(.caption).foregroundStyle(.secondary)
+                                .frame(width: 44, alignment: .trailing)
+                            Picker("", selection: Binding(
+                                get: { model.selectedEmbed },
+                                set: { model.setEmbed($0) }
+                            )) {
+                                ForEach(model.embedModels, id: \.name) { m in
+                                    Text("\(m.name)  (\(m.size))").tag(m.name)
+                                }
+                                if model.embedModels.isEmpty {
+                                    Text(model.selectedEmbed.isEmpty ? "Loading…" : model.selectedEmbed)
+                                        .tag(model.selectedEmbed)
+                                }
+                            }
+                            .pickerStyle(.menu)
                         }
-                        if model.llmModels.isEmpty {
-                            Text(model.selectedLLM.isEmpty ? "Loading…" : model.selectedLLM)
-                                .tag(model.selectedLLM)
-                        }
+                        Text("Changing the embedding model clears all stored RAG memory.")
+                            .font(.caption2).foregroundStyle(.tertiary).padding(.leading, 52)
                     }
-                    .pickerStyle(.menu)
-                    .padding(4)
+                    .padding(8)
+                } label: {
+                    Label("Memory  (RAG embeddings)", systemImage: "memorychip").font(.caption).foregroundStyle(.secondary)
                 }
 
-                // Blocked IPs
-                GroupBox("Blocked IPs") {
+                // ── Blocked IPs ───────────────────────────────────────────────
+                GroupBox {
                     VStack(alignment: .leading, spacing: 6) {
                         if model.blockedIPs.isEmpty {
                             HStack(spacing: 6) {
-                                Image(systemName: "checkmark.shield")
-                                    .foregroundStyle(.green)
-                                Text("No IPs blocked").foregroundStyle(.secondary)
-                                    .font(.caption)
+                                Image(systemName: "checkmark.shield.fill").foregroundStyle(.green)
+                                Text("No IPs currently blocked")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
-                            .padding(4)
+                            .padding(.vertical, 2)
                         } else {
                             ForEach(model.blockedIPs, id: \.self) { ip in
                                 HStack(spacing: 8) {
-                                    Image(systemName: "slash.circle.fill")
-                                        .foregroundStyle(.red).font(.caption)
-                                    Text(ip)
-                                        .font(.system(size: 12, design: .monospaced))
+                                    Image(systemName: "nosign").foregroundStyle(.red).font(.caption)
+                                    Text(ip).font(.system(size: 12, design: .monospaced))
                                     Spacer()
                                     Button("Unblock") { model.unblockIP(ip) }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.mini)
-                                        .tint(.orange)
+                                        .buttonStyle(.bordered).controlSize(.mini).tint(.orange)
                                 }
                             }
                         }
-                        Text("IPs blocked by the LLM via the block_ip tool or manually rejected events.")
+                        Text("IPs blocked by the LLM's block_ip tool. Unblock to allow connections again.")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                     .padding(8)
-                }
-
-                // Embedding model
-                GroupBox("Memory Model") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Picker("", selection: Binding(
-                            get: { model.selectedEmbed },
-                            set: { model.setEmbed($0) }
-                        )) {
-                            ForEach(model.embedModels, id: \.name) { m in
-                                Text("\(m.name)  (\(m.size))").tag(m.name)
-                            }
-                            if model.embedModels.isEmpty {
-                                Text(model.selectedEmbed.isEmpty ? "Loading…" : model.selectedEmbed)
-                                    .tag(model.selectedEmbed)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        Text("Changing the embedding model clears all stored RAG embeddings.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    .padding(4)
+                } label: {
+                    Label("Blocked IPs", systemImage: "shield.slash").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .padding(16)
         }
+    }
+
+    // MARK: Helpers
+    @ViewBuilder
+    private func statusBanner<A: View>(
+        icon: String, color: Color, title: String, message: String,
+        @ViewBuilder action: () -> A
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(color).font(.title3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).fontWeight(.semibold)
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            action()
+        }
+        .padding(10)
+        .background(color.opacity(0.08))
+        .cornerRadius(8)
+    }
+
+    private func logView(_ lines: [String], height: CGFloat) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(lines, id: \.self) { line in
+                    Text(line).font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        }
+        .frame(height: height)
+        .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(6)
     }
 }
 
