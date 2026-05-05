@@ -8,7 +8,9 @@ granite4.1:3b reviews network anomaly threads with RAG short-term memory.
 - Stores every event + embedding in the DB for the panel UI
 """
 
+import fcntl
 import ipaddress
+import os
 import json
 import logging
 import logging.handlers
@@ -21,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from sys import exit
 
+import baseline as _baseline
 import db
 import embed as emb
 
@@ -28,6 +31,7 @@ NETMON_DIR    = Path.home() / ".netmon"
 ANOMALY_LOG   = NETMON_DIR / "anomalies.log"
 ANALYSIS_LOG  = NETMON_DIR / "analysis.log"
 CURSOR_FILE   = NETMON_DIR / ".analyze_cursor"
+LOCK_FILE     = NETMON_DIR / ".analyze.lock"
 CONFIG_FILE   = NETMON_DIR / "config.json"
 PANEL_URL     = "http://localhost:6543"
 MENUBAR_BIN   = Path("/Applications/NetmonMenuBar.app/Contents/MacOS/NetmonMenuBar")
@@ -37,11 +41,33 @@ OLLAMA_BASE   = "http://localhost:11434"
 _ip_cache: dict[str, str] = {}  # per-run cache; keyed by bare IP
 
 
+def _acquire_lock():
+    """Non-blocking exclusive lock using fcntl.  Returns open file object, or None if busy."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    f = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        f.close()
+        return None
+
+
 def read_config() -> dict:
     try:
         return json.loads(CONFIG_FILE.read_text())
     except Exception:
         return {"autonomous_mode": False}
+
+
+def _effective_backend() -> str:
+    """Return the active backend: 'claude' if configured or ANTHROPIC_API_KEY is set, else 'ollama'."""
+    cfg = read_config()
+    if cfg.get("backend") == "claude":
+        return "claude"
+    if cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY"):
+        return "claude"
+    return "ollama"
 
 
 # ── Ollama availability + model management ────────────────────────────────────
@@ -59,39 +85,73 @@ def ollama_status() -> dict:
 
 
 def ensure_models() -> bool:
-    """
-    Check Ollama is running and pull the configured LLM + embed models if missing.
-    Returns True when both models are ready; False if Ollama is unreachable or pull fails.
-    """
-    cfg   = read_config()
-    needs = [
-        cfg.get("llm_model",   "granite4.1:3b"),
-        cfg.get("embed_model", "nomic-embed-text-v2-moe"),
-    ]
+    """Verify the configured backend is ready; pull Ollama embed model if needed."""
+    cfg     = read_config()
+    backend = _effective_backend()
 
+    if backend == "claude":
+        api_key = cfg.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            _log("[SETUP] No ANTHROPIC_API_KEY — Claude backend unavailable")
+            return False
+        # Embeddings still go through Ollama; best-effort pull
+        status = ollama_status()
+        if status["available"]:
+            embed_model     = cfg.get("embed_model", "nomic-embed-text-v2-moe")
+            installed_bases = {m.split(":")[0] for m in status["models"]}
+            if embed_model.split(":")[0] not in installed_bases:
+                _log(f"[SETUP] Embed model '{embed_model}' not found — pulling…")
+                try:
+                    r = subprocess.run(
+                        ["ollama", "pull", embed_model],
+                        timeout=600, capture_output=True, text=True,
+                    )
+                    if r.returncode != 0:
+                        _log(f"[SETUP/ERROR] Pull failed for '{embed_model}': {r.stderr[:200]}")
+                    else:
+                        _log(f"[SETUP] Pulled '{embed_model}' successfully")
+                except Exception as e:
+                    _log(f"[SETUP/ERROR] Could not pull '{embed_model}': {e}")
+        else:
+            _log("[SETUP] Ollama not running — embeddings/RAG unavailable (Claude analysis continues)")
+        return True
+
+    # Ollama backend
     status = ollama_status()
     if not status["available"]:
         _log("[SETUP] Ollama not running — analysis skipped (manual review mode active)")
         return False
-
+    embed_model     = cfg.get("embed_model", "nomic-embed-text-v2-moe")
     installed_bases = {m.split(":")[0] for m in status["models"]}
-    for model in needs:
-        base = model.split(":")[0]
-        if base not in installed_bases:
-            _log(f"[SETUP] Model '{model}' not found — pulling (this may take a few minutes)…")
-            try:
-                result = subprocess.run(
-                    ["ollama", "pull", model],
-                    timeout=600, capture_output=True, text=True,
-                )
-                if result.returncode != 0:
-                    _log(f"[SETUP/ERROR] Pull failed for '{model}': {result.stderr[:200]}")
-                    return False
-                _log(f"[SETUP] Pulled '{model}' successfully")
-            except Exception as e:
-                _log(f"[SETUP/ERROR] Could not pull '{model}': {e}")
+    if embed_model.split(":")[0] not in installed_bases:
+        _log(f"[SETUP] Embed model '{embed_model}' not found — pulling…")
+        try:
+            r = subprocess.run(
+                ["ollama", "pull", embed_model],
+                timeout=600, capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                _log(f"[SETUP/ERROR] Pull failed for '{embed_model}': {r.stderr[:200]}")
                 return False
-
+            _log(f"[SETUP] Pulled '{embed_model}' successfully")
+        except Exception as e:
+            _log(f"[SETUP/ERROR] Could not pull '{embed_model}': {e}")
+            return False
+    llm_model = cfg.get("llm_model", "granite4.1:3b")
+    if llm_model.split(":")[0] not in installed_bases:
+        _log(f"[SETUP] Model '{llm_model}' not found — pulling (this may take a few minutes)…")
+        try:
+            r = subprocess.run(
+                ["ollama", "pull", llm_model],
+                timeout=600, capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                _log(f"[SETUP/ERROR] Pull failed for '{llm_model}': {r.stderr[:200]}")
+                return False
+            _log(f"[SETUP] Pulled '{llm_model}' successfully")
+        except Exception as e:
+            _log(f"[SETUP/ERROR] Could not pull '{llm_model}': {e}")
+            return False
     return True
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -297,15 +357,7 @@ def auto_resolve(process, remote, decision, reason) -> str:
     severity = "info" if decision == "confirmed" else "warning"
     summary  = f"[AUTO-{decision.upper()}] {reason}"
 
-    existing = db.find_pending_event(process, remote)
-    if existing:
-        db.update_event(existing, decision, severity, summary, vector)
-    else:
-        event_id = db.insert_event(
-            process=process, remote=remote,
-            severity=severity, summary=summary, embedding=vector,
-        )
-        db.update_status(event_id, decision)
+    db.upsert_resolved_event(process, remote, decision, severity, summary, vector)
 
     if decision == "confirmed":
         mark_as_normal(process, remote, reason)
@@ -314,16 +366,11 @@ def auto_resolve(process, remote, decision, reason) -> str:
 
 
 def mark_as_normal(process, remote, reason="") -> str:
-    baseline = NETMON_DIR / "baseline.txt"
-    entry = f"{process}|{remote}"
-    existing = set(baseline.read_text().splitlines()) if baseline.exists() else set()
-    if entry in existing:
-        return "already in baseline"
-    baseline.parent.mkdir(parents=True, exist_ok=True)
-    # Always write sorted — monitor.sh uses `comm` which requires sorted input on both sides
-    baseline.write_text("\n".join(sorted(existing | {entry})) + "\n")
-    _log(f"[BASELINE+] {entry}  reason={reason!r}")
-    return "added to baseline"
+    entry  = f"{process}|{remote}"
+    result = _baseline.add_entry(NETMON_DIR / "baseline.txt", entry)
+    if result == "added to baseline":
+        _log(f"[BASELINE+] {entry}  reason={reason!r}")
+    return result
 
 
 def get_process_info(process_name: str) -> str:
@@ -438,11 +485,11 @@ def check_ip_reputation(ip: str) -> str:
             results = json.loads(r.read())
         d = results[0] if results else {}
         if d.get("status") == "success":
-            lines.append(f"Country: {d.get('country', '?')}")
-            lines.append(f"ISP: {d.get('isp', '?')}")
-            lines.append(f"Org: {d.get('org', '?')}")
-            lines.append(f"ASN: {d.get('as', '?')}")
-            rdns = d.get("reverse", "")
+            lines.append(f"Country: {sanitize_field(str(d.get('country', '?')), 64)}")
+            lines.append(f"ISP: {sanitize_field(str(d.get('isp', '?')), 64)}")
+            lines.append(f"Org: {sanitize_field(str(d.get('org', '?')), 64)}")
+            lines.append(f"ASN: {sanitize_field(str(d.get('as', '?')), 64)}")
+            rdns = sanitize_field(str(d.get("reverse", "")), 128)
             if rdns:
                 lines.append(f"Reverse DNS: {rdns}")
             lines.append(f"Hosting/datacenter: {d.get('hosting', False)}")
@@ -599,15 +646,35 @@ def _validate_ip(ip: str) -> str:
 
 # ── Input sanitization ────────────────────────────────────────────────────────
 
-# Patterns that suggest prompt injection regardless of model response
+# Named injection rules — each name is logged when its pattern triggers a block
+_INJECTION_RULES: dict[str, re.Pattern] = {
+    "ignore_instructions": re.compile(
+        r"ignore (previous|all|prior|above) (instructions?|prompts?|context)",
+        re.IGNORECASE,
+    ),
+    "system_tag": re.compile(
+        r"new instructions?:|system:|<\|system\|>|\[INST\]|\[SYS\]|###\s*instruction|###\s*system",
+        re.IGNORECASE,
+    ),
+    "forget_context": re.compile(
+        r"forget (everything|what|all)|disregard (your|previous|all)",
+        re.IGNORECASE,
+    ),
+    "role_override": re.compile(
+        r"you are now|act as (a|an|if)|pretend (you are|to be)|"
+        r"your new (role|persona|task|goal)",
+        re.IGNORECASE,
+    ),
+    "instruction_override": re.compile(
+        r"override (your|all)|"
+        r"do not (follow|apply|use) (your|the) (rules?|instructions?|guidelines?)",
+        re.IGNORECASE,
+    ),
+}
+
+# Combined fast-check pattern (avoids iterating all rules on every call)
 _INJECTION_PATTERNS = re.compile(
-    r"(ignore (previous|all|prior|above) (instructions?|prompts?|context)|"
-    r"you are now|new instructions?:|system:|<\|system\|>|"
-    r"\[INST\]|\[SYS\]|### instruction|###system|"
-    r"forget (everything|what|all)|disregard (your|previous|all)|"
-    r"act as (a|an|if)|pretend (you are|to be)|"
-    r"your new (role|persona|task|goal)|override (your|all)|"
-    r"do not (follow|apply|use) (your|the) (rules?|instructions?|guidelines?))",
+    "|".join(p.pattern for p in _INJECTION_RULES.values()),
     re.IGNORECASE,
 )
 
@@ -623,17 +690,36 @@ def sanitize_field(text: str, max_len: int = 200) -> str:
     return text[:max_len]
 
 
-def check_injection(context: str) -> bool:
+def _snippet(text: str, max_len: int = 120) -> str:
+    """Return a single-line excerpt of text for log messages."""
+    excerpt = re.sub(r"\s+", " ", text.strip())[:max_len]
+    return repr(excerpt)
+
+
+def check_injection(context: str, llm_stage: bool = True) -> "str | None":
     """
-    Two-stage injection guard:
-    1. Fast regex scan — instant, catches common templates.
-    2. LLM guard call — catches semantic injection attempts the regex misses.
-    Returns True if injection is suspected.
+    Two-stage injection guard.
+    llm_stage=False: regex-only (use for our own generated summaries where LLM false-positives
+    are common; reserve LLM stage for external/tool-result data).
+    Returns the policy name (str) that triggered the block, or None if the context is safe.
     """
-    # Stage 1: regex
+    # Stage 1: fast combined check, then identify the specific named rule
     if _INJECTION_PATTERNS.search(context):
-        _log("[GUARD] Regex matched known injection pattern — blocking context")
-        return True
+        policy  = "unknown_rule"
+        excerpt = ""
+        for name, pattern in _INJECTION_RULES.items():
+            m = pattern.search(context)
+            if m:
+                policy = name
+                start  = max(0, m.start() - 20)
+                end    = min(len(context), m.end() + 40)
+                excerpt = re.sub(r"\s+", " ", context[start:end].strip())
+                break
+        _log(f"[GUARD] Blocked by policy '{policy}': {excerpt!r}")
+        return policy
+
+    if not llm_stage:
+        return None
 
     # Stage 2: LLM guard (lightweight, short timeout, no tools)
     guard_prompt = (
@@ -655,31 +741,29 @@ def check_injection(context: str) -> bool:
     if not resp:
         # Fail-close: if the guard can't respond, block the context to prevent
         # semantic injections slipping through when Ollama is temporarily unavailable.
-        _log("[GUARD] LLM guard unavailable — blocking context (fail-close)")
-        return True
+        _log(f"[GUARD] LLM guard unavailable — blocking context (fail-close); snippet={_snippet(context)}")
+        return "llm_unavailable"
     verdict = resp.get("message", {}).get("content", "").strip().upper()
     if verdict.startswith("INJECTION"):
-        _log("[GUARD] LLM flagged injection attempt — blocking context")
-        return True
+        _log(f"[GUARD] LLM flagged injection (semantic); snippet={_snippet(context)}")
+        return "llm_semantic"
     if verdict.startswith("SAFE"):
-        return False
+        return None
     # Unknown verdict → fail-close
-    _log(f"[GUARD] Unexpected guard verdict {verdict!r} — blocking context (fail-close)")
-    return True
+    _log(f"[GUARD] Unexpected guard verdict {verdict!r}; snippet={_snippet(context)} — blocking (fail-close)")
+    return "llm_unknown_verdict"
 
 
-# ── Ollama ─────────────────────────────────────────────────────────────────────
+# ── LLM backends ─────────────────────────────────────────────────────────────
 
 _THINKING_MODELS = ("qwen3", "deepseek-r1", "deepseek-r2")
 
 
-def chat(messages: list, tools: list | None = None, timeout: int = 180, model: str = "") -> dict:
+def _chat_ollama(messages: list, tools: list | None, timeout: int, model: str) -> dict:
     active_model = model or read_config().get("llm_model", "granite4.1:3b")
     payload: dict = {"model": active_model, "messages": messages, "stream": False}
     if tools:
         payload["tools"] = tools
-    # Disable extended thinking for models that support it — analysis calls favour
-    # low latency over deep reasoning; thinking can 10x response time on small models.
     if any(t in active_model for t in _THINKING_MODELS):
         payload["think"] = False
     req = urllib.request.Request(
@@ -696,7 +780,143 @@ def chat(messages: list, tools: list | None = None, timeout: int = 180, model: s
         return {}
 
 
+# ── Claude API backend ────────────────────────────────────────────────────────
+
+def _tools_for_claude() -> list:
+    """Convert TOOLS from Ollama function format to Anthropic tool format."""
+    result = []
+    for t in TOOLS:
+        fn = t["function"]
+        result.append({
+            "name": fn["name"],
+            "description": fn["description"],
+            "input_schema": fn["parameters"],
+        })
+    return result
+
+
+def _split_system(messages: list) -> tuple[str, list]:
+    """Extract the system role and return (system_text, non-system messages)."""
+    system = ""
+    rest: list = []
+    for msg in messages:
+        if msg["role"] == "system":
+            system = msg.get("content", "")
+        else:
+            rest.append({"role": msg["role"], "content": str(msg.get("content", ""))})
+    return system, rest
+
+
+def _get_claude_client():
+    """Return an anthropic.Anthropic client, or None if package/key unavailable."""
+    try:
+        import anthropic
+    except ImportError:
+        _log("[ERROR] 'anthropic' package not installed — run: pip install anthropic")
+        return None
+    cfg     = read_config()
+    api_key = cfg.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        _log("[ERROR] No ANTHROPIC_API_KEY in config.json or environment")
+        return None
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def _chat_claude(messages: list, tools: list | None, timeout: int, model: str) -> dict:
+    """
+    Simple (non-agentic) Claude API call.
+    Returns a dict shaped like Ollama's response: {"message": {"content": "..."}}
+    so that check_injection() and other callers work unchanged.
+    """
+    client = _get_claude_client()
+    if not client:
+        return {}
+    cfg          = read_config()
+    active_model = model or cfg.get("llm_model", "claude-opus-4-7")
+    system, claude_messages = _split_system(messages)
+    if not claude_messages:
+        return {}
+    kwargs: dict = {"model": active_model, "max_tokens": 1024, "messages": claude_messages}
+    if system:
+        kwargs["system"] = system
+    try:
+        response = client.messages.create(**kwargs)
+        text = "".join(
+            b.text for b in response.content if b.type == "text" and hasattr(b, "text")
+        )
+        return {"message": {"role": "assistant", "content": text}}
+    except Exception as e:
+        _log(f"[ERROR] Claude API: {e}")
+        return {}
+
+
+def _run_with_tools_claude(messages: list) -> str:
+    """Agentic tool-use loop using the Anthropic Claude API."""
+    client = _get_claude_client()
+    if not client:
+        return ""
+    cfg          = read_config()
+    active_model = cfg.get("llm_model", "claude-opus-4-7")
+    tools_claude = _tools_for_claude()
+    system, claude_messages = _split_system(messages)
+
+    for _ in range(6):
+        kwargs: dict = {
+            "model":     active_model,
+            "max_tokens": 4096,
+            "messages":  claude_messages,
+            "tools":     tools_claude,
+        }
+        if system:
+            kwargs["system"] = system
+        try:
+            response = client.messages.create(**kwargs)
+        except Exception as e:
+            _log(f"[ERROR] Claude API: {e}")
+            return ""
+
+        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+        text = "".join(
+            b.text for b in response.content if b.type == "text" and hasattr(b, "text")
+        )
+
+        if not tool_use_blocks:
+            return text
+
+        # Append assistant turn with full content block list (Anthropic requirement)
+        claude_messages.append({"role": "assistant", "content": response.content})
+
+        # Execute tools and collect results in one user turn
+        # Injection guard applies only to tools that return external/system data
+        _EXTERNAL_TOOLS = {"get_process_info", "check_ip_reputation"}
+        tool_results = []
+        for block in tool_use_blocks:
+            result = dispatch(block.name, block.input)
+            if block.name in _EXTERNAL_TOOLS:
+                policy = check_injection(str(result), llm_stage=False)
+                if policy:
+                    _log(f"[GUARD] Tool result blocked; tool={block.name} policy='{policy}' snippet={_snippet(str(result))}")
+                    result = f"[BLOCKED:{policy}] Tool result contained suspected injection payload"
+            tool_results.append({
+                "type":        "tool_result",
+                "tool_use_id": block.id,
+                "content":     str(result),
+            })
+        claude_messages.append({"role": "user", "content": tool_results})
+
+    return ""
+
+
+def chat(messages: list, tools: list | None = None, timeout: int = 180, model: str = "") -> dict:
+    if _effective_backend() == "claude":
+        return _chat_claude(messages, tools, timeout, model)
+    return _chat_ollama(messages, tools, timeout, model)
+
+
 def run_with_tools(messages: list) -> str:
+    if _effective_backend() == "claude":
+        return _run_with_tools_claude(messages)
+    # Ollama path
     for _ in range(6):
         resp = chat(messages, tools=TOOLS)
         if not resp:
@@ -710,11 +930,13 @@ def run_with_tools(messages: list) -> str:
         messages.append(msg)
         for call in tool_calls:
             fn     = call.get("function", {})
+            _EXTERNAL_TOOLS = {"get_process_info", "check_ip_reputation"}
             result = dispatch(fn.get("name", ""), fn.get("arguments", {}))
-            # Tool results from get_process_info contain raw lsof/ps output —
-            # sanitize before feeding back to the LLM to block second-order injection.
-            if fn.get("name") == "get_process_info" and check_injection(str(result)):
-                result = "[BLOCKED] Tool result contained suspected injection payload"
+            if fn.get("name") in _EXTERNAL_TOOLS:
+                policy = check_injection(str(result), llm_stage=False)
+                if policy:
+                    _log(f"[GUARD] Tool result blocked; tool={fn.get('name')} policy='{policy}' snippet={_snippet(str(result))}")
+                    result = f"[BLOCKED:{policy}] Tool result contained suspected injection payload"
             messages.append({"role": "tool", "name": fn.get("name"), "content": result})
 
     return ""
@@ -755,18 +977,41 @@ def load_new_anomalies() -> list[str]:
     if not ANOMALY_LOG.exists():
         return []
     all_lines = [l for l in ANOMALY_LOG.read_text().splitlines() if "[ANOMALY]" in l]
+
     cursor = 0
+    last_line = ""
     if CURSOR_FILE.exists():
         try:
-            cursor = int(CURSOR_FILE.read_text().strip())
-        except ValueError:
-            pass
-    # Detect log rotation: if cursor > file length, the log was trimmed.
-    # Re-process the last 100 lines to avoid missing events near the rotation boundary.
+            data = json.loads(CURSOR_FILE.read_text())
+            cursor = int(data["count"])
+            last_line = data.get("last", "")
+        except Exception:
+            # Legacy plain-integer cursor or corrupt file — treat as line count
+            try:
+                cursor = int(CURSOR_FILE.read_text().strip())
+            except Exception:
+                pass
+
     if cursor > len(all_lines):
-        cursor = max(0, len(all_lines) - 100)
+        # Log was rotated by monitor.sh.  Try to find the last processed line in the new
+        # file so we resume exactly after it rather than re-processing an overlap window.
+        if last_line:
+            try:
+                cursor = all_lines.index(last_line) + 1
+            except ValueError:
+                # Last line is in the truncated portion — process entire new file
+                cursor = 0
+        else:
+            cursor = 0
+
     new = all_lines[cursor:]
-    CURSOR_FILE.write_text(str(len(all_lines)))
+
+    # Atomic write: temp file then rename so a crash never leaves a partial cursor
+    last = all_lines[-1] if all_lines else ""
+    tmp = CURSOR_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"count": len(all_lines), "last": last}))
+    tmp.replace(CURSOR_FILE)
+
     return new
 
 
@@ -960,8 +1205,9 @@ def recheck_autonomous_pending() -> int:
         ]
         summary, _parsed = build_context(fake_lines)
 
-        if check_injection(summary):
-            _log(f"[RECHECK/GUARD] Injection suspected for '{proc}' — skipping")
+        policy = check_injection(summary, llm_stage=False)
+        if policy:
+            _log(f"[RECHECK/GUARD] Blocked for proc='{proc}' policy='{policy}'; snippet={_snippet(summary)}")
             continue
 
         messages = [
@@ -1010,10 +1256,12 @@ def main():
     system_prompt = SYSTEM_AUTONOMOUS if auto else SYSTEM
 
     # Group by process so each LLM call handles one process at a time (more reliable tool use)
+    # sanitize_field decodes \xNN escapes (e.g. lsof emits "Slack\x20") so keys match build_context
     groups: dict[str, list[str]] = defaultdict(list)
     for line in new_lines:
         try:
-            proc = line.split("] [ANOMALY] ", 1)[-1].split(" -> ")[0].strip()
+            raw_proc = line.split("] [ANOMALY] ", 1)[-1].split(" -> ")[0]
+            proc = sanitize_field(raw_proc, max_len=64).strip()
             groups[proc].append(line)
         except Exception:
             continue
@@ -1022,12 +1270,13 @@ def main():
         summary, _parsed = build_context(lines)
 
         # Injection guard: check assembled context before sending to analysis model
-        if check_injection(summary):
-            _log(f"[GUARD/BLOCKED] Injection suspected in context for proc='{proc}' — skipped")
+        policy = check_injection(summary, llm_stage=False)
+        if policy:
+            _log(f"[GUARD/BLOCKED] proc='{proc}' policy='{policy}'; snippet={_snippet(summary)}")
             db.insert_event(
                 process=proc[:64], remote="unknown",
                 severity="critical",
-                summary="[BLOCKED] Prompt injection attempt detected in event data — manual review required",
+                summary=f"[BLOCKED] Injection guard triggered — policy: {policy}. Manual review required.",
             )
             continue
 
@@ -1054,15 +1303,28 @@ import sys as _sys
 
 
 if __name__ == "__main__":
-    if "--recheck" in _sys.argv:
-        # Lightweight heartbeat mode: sweep + recheck pending in autonomous mode
-        import logging as _logging
-        _logging.getLogger("netmon")  # ensure logger is set up
-        db.init()
-        if ensure_models():
-            sweep_pending_events()
-            cfg = read_config()
-            if cfg.get("autonomous_mode", False):
-                recheck_autonomous_pending()
-    else:
-        main()
+    _lock = _acquire_lock()
+    if _lock is None:
+        # Another instance (main run or heartbeat) is already running — skip silently.
+        # Log only if a logger is available; it may not be set up yet in --recheck mode.
+        try:
+            _log("[LOCK] Another analyze instance already running — exiting")
+        except Exception:
+            pass
+        _sys.exit(0)
+    try:
+        if "--recheck" in _sys.argv:
+            # Lightweight heartbeat mode: sweep + recheck pending in autonomous mode
+            import logging as _logging
+            _logging.getLogger("netmon")  # ensure logger is set up
+            db.init()
+            if ensure_models():
+                sweep_pending_events()
+                cfg = read_config()
+                if cfg.get("autonomous_mode", False):
+                    recheck_autonomous_pending()
+        else:
+            main()
+    finally:
+        fcntl.flock(_lock, fcntl.LOCK_UN)
+        _lock.close()

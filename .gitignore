@@ -8,6 +8,7 @@ anomalies.log
 baseline.txt
 config.json
 .analyze_cursor
+.analyze.lock
 .current.tmp
 __pycache__/
 *.pyc

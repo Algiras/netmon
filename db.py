@@ -12,7 +12,8 @@ from datetime import datetime
 from pathlib import Path
 
 DB_PATH = Path.home() / ".netmon" / "netmon.db"
-EMB_DIM = 768  # nomic-embed-text-v2-moe
+EMB_DIM             = 768   # nomic-embed-text-v2-moe
+_FIND_SIMILAR_LIMIT = 5000  # max rows scanned by find_similar()
 
 
 def _conn() -> sqlite3.Connection:
@@ -122,6 +123,85 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+def upsert_resolved_event(
+    process: str, remote: str, decision: str,
+    severity: str, summary: str,
+    embedding: list[float] | None = None,
+) -> int:
+    """
+    Atomically find an existing pending event for (process, remote) and resolve it,
+    or insert a new pre-resolved event.  Single transaction — no TOCTOU gap.
+    Returns the event id.
+    """
+    emb_json = json.dumps(embedding) if embedding else ""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id FROM events WHERE process=? AND remote=? AND status='pending' "
+            "ORDER BY ts DESC LIMIT 1",
+            (process, remote),
+        ).fetchone()
+        if row:
+            event_id = row["id"]
+            if emb_json:
+                c.execute(
+                    "UPDATE events SET status=?,severity=?,summary=?,embedding=? WHERE id=?",
+                    (decision, severity, summary, emb_json, event_id),
+                )
+            else:
+                c.execute(
+                    "UPDATE events SET status=?,severity=?,summary=? WHERE id=?",
+                    (decision, severity, summary, event_id),
+                )
+        else:
+            cur = c.execute(
+                "INSERT INTO events (ts,process,remote,severity,summary,embedding,status) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (ts, process, remote, severity, summary, emb_json, decision),
+            )
+            event_id = cur.lastrowid
+    return event_id
+
+
+def cascade_decision(event_id: int, decision: str, min_sim: float) -> int:
+    """
+    Find all pending events similar to event_id and resolve them in one transaction.
+    Returns count of resolved events.
+    """
+    with _conn() as c:
+        src = c.execute("SELECT embedding FROM events WHERE id=?", (event_id,)).fetchone()
+        if not src or not src["embedding"]:
+            return 0
+        try:
+            vector = json.loads(src["embedding"])
+        except Exception:
+            return 0
+
+        rows = c.execute(
+            "SELECT id, severity, embedding FROM events "
+            "WHERE status='pending' AND embedding != '' AND id != ?",
+            (event_id,),
+        ).fetchall()
+
+        to_update: list[tuple[int, float]] = []
+        for r in rows:
+            try:
+                sim = _cosine(vector, json.loads(r["embedding"]))
+                if sim >= min_sim:
+                    to_update.append((r["id"], round(sim, 3)))
+            except Exception:
+                continue
+
+        for eid, sim in to_update:
+            c.execute(
+                "UPDATE events SET status=?, summary=? WHERE id=?",
+                (decision,
+                 f"[AUTO-{decision.upper()}] Cascaded from similar event #{event_id} (sim={sim})",
+                 eid),
+            )
+    return len(to_update)
+
+
 def clear_embeddings():
     """Null-out all stored embeddings (call when embedding model changes)."""
     with _conn() as c:
@@ -151,7 +231,8 @@ def find_similar(
     with _conn() as c:
         rows = c.execute(
             "SELECT id,ts,process,remote,severity,summary,status,embedding FROM events "
-            "WHERE embedding != '' ORDER BY ts DESC LIMIT 1000"
+            "WHERE embedding != '' ORDER BY ts DESC LIMIT ?",
+            (_FIND_SIMILAR_LIMIT,),
         ).fetchall()
 
     hits: list[tuple[float, dict]] = []

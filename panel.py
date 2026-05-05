@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
+import baseline as _baseline
 import db
 
 PORT        = 6543
@@ -37,24 +38,8 @@ RAG_CASCADE_SIM = 0.88  # similarity threshold for cascading manual decisions
 
 
 def _cascade_decision(event_id: int, decision: str) -> int:
-    """After a manual confirm/reject, auto-resolve similar pending events."""
-    vector = db.get_event_embedding(event_id)
-    if not vector:
-        return 0
-    similar_pending = db.find_similar(
-        vector, top_k=50, min_sim=RAG_CASCADE_SIM, only_status="pending"
-    )
-    count = 0
-    for s in similar_pending:
-        if s["id"] == event_id:
-            continue
-        db.update_event(
-            s["id"], decision, s["severity"],
-            f"[AUTO-{decision.upper()}] Cascaded from similar event #{event_id} "
-            f"(sim={s['similarity']})",
-        )
-        count += 1
-    return count
+    """After a manual confirm/reject, auto-resolve similar pending events in one transaction."""
+    return db.cascade_decision(event_id, decision, RAG_CASCADE_SIM)
 
 
 def _ollama_available() -> bool:
@@ -102,7 +87,8 @@ def list_ollama_models() -> dict:
 # ── HTTP handler ───────────────────────────────────────────────────────────────
 
 _ALLOWED_ACTIONS     = {"confirmed", "rejected", "revert", "pending"}
-_ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model", "abuseipdb_key"}
+_ALLOWED_CONFIG_KEYS = {"autonomous_mode", "llm_model", "embed_model", "abuseipdb_key",
+                        "backend", "anthropic_api_key"}
 _MODEL_RE            = re.compile(r"^[\w][\w.\-:/]{0,100}$")
 MAX_BODY             = 65_536  # 64 KB — enough for any legitimate panel request
 
@@ -161,9 +147,17 @@ class Handler(BaseHTTPRequestHandler):
             clear_emb = body.pop("_clear_embeddings", False)
             if "toggle" in body:
                 key = body["toggle"]
-                # Block enabling autonomous mode when Ollama is unreachable
                 if key == "autonomous_mode" and not cfg.get("autonomous_mode", False):
-                    if not _ollama_available():
+                    backend = cfg.get("backend", "ollama")
+                    if backend == "claude":
+                        import os as _os
+                        api_key = cfg.get("anthropic_api_key", "") or _os.environ.get("ANTHROPIC_API_KEY", "")
+                        if not api_key:
+                            self._respond(409,
+                                json.dumps({"error": "No ANTHROPIC_API_KEY configured — cannot enable autonomous mode"}),
+                                "application/json")
+                            return
+                    elif not _ollama_available():
                         self._respond(409,
                             json.dumps({"error": "Ollama not available — cannot enable autonomous mode"}),
                             "application/json")
@@ -210,24 +204,18 @@ class Handler(BaseHTTPRequestHandler):
 
             # If confirmed, add to baseline (sorted — comm requires sorted input)
             if action == "confirmed" and row:
-                baseline = Path.home() / ".netmon" / "baseline.txt"
-                entry    = f"{row['process']}|{row['remote']}"
-                existing = set(baseline.read_text().splitlines()) if baseline.exists() else set()
-                if entry not in existing:
-                    baseline.parent.mkdir(parents=True, exist_ok=True)
-                    baseline.write_text("\n".join(sorted(existing | {entry})) + "\n")
+                _baseline.add_entry(
+                    Path.home() / ".netmon" / "baseline.txt",
+                    f"{row['process']}|{row['remote']}",
+                )
 
             # Revert: reset to pending, undo baseline/block side-effects
             if action == "revert" and row:
                 db.update_status(event_id, "pending")
-                # Remove from baseline if it was confirmed
-                baseline = Path.home() / ".netmon" / "baseline.txt"
-                entry = f"{row['process']}|{row['remote']}"
-                if baseline.exists():
-                    lines = baseline.read_text().splitlines()
-                    new_lines = [l for l in lines if l.strip() != entry]
-                    if len(new_lines) != len(lines):
-                        baseline.write_text("\n".join(new_lines) + ("\n" if new_lines else ""))
+                _baseline.remove_entry(
+                    Path.home() / ".netmon" / "baseline.txt",
+                    f"{row['process']}|{row['remote']}",
+                )
                 # Remove IP from blocked list if it was rejected
                 blocked_file = Path.home() / ".netmon" / "blocked_ips.txt"
                 bare_ip = row['remote'].split(":")[0]
