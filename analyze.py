@@ -9,6 +9,8 @@ granite4.1:3b reviews network anomaly threads with RAG short-term memory.
 """
 
 import json
+import logging
+import logging.handlers
 import re
 import subprocess
 import urllib.error
@@ -495,15 +497,33 @@ def run_with_tools(messages: list) -> str:
     return ""
 
 
+# ── Logging setup ──────────────────────────────────────────────────────────────
+
+def _setup_logger() -> logging.Logger:
+    ANALYSIS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("netmon")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fh = logging.handlers.RotatingFileHandler(
+        ANALYSIS_LOG, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
+
+
+_logger = _setup_logger()
+
+
 # ── Data helpers ───────────────────────────────────────────────────────────────
 
 def _log(msg: str):
-    ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line)
-    ANALYSIS_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with open(ANALYSIS_LOG, "a") as f:
-        f.write(line + "\n")
+    _logger.info(msg)
 
 
 def load_new_anomalies() -> list[str]:
